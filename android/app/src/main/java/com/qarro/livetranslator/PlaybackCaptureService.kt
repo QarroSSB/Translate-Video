@@ -174,7 +174,8 @@ class PlaybackCaptureService : Service() {
                 onMetric = onMetric,
                 onError = onError,
             )
-        }.also { it.connect() }
+        }
+        socket?.connect()
 
         val manager = getSystemService(MediaProjectionManager::class.java)
         projection = manager.getMediaProjection(resultCode, resultData).also { mediaProjection ->
