@@ -22,10 +22,8 @@ class TranslationSocket(
     private val onStatus: (String) -> Unit,
     private val onMetric: (String) -> Unit,
     private val onError: (String) -> Unit,
-) {
+) : AudioTranslationClient {
     companion object {
-        // ~4 seconds of 24 kHz mono PCM16 after base64/JSON overhead. Beyond this,
-        // sending more audio would mostly create stale translation rather than useful latency.
         private const val MAX_SOCKET_QUEUE_BYTES = 256L * 1024L
     }
 
@@ -37,7 +35,7 @@ class TranslationSocket(
     private val opened = AtomicBoolean(false)
     private val droppedAudioFrames = AtomicInteger(0)
 
-    fun connect() {
+    override fun connect() {
         val request = Request.Builder().url(endpoint).build()
         socket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
@@ -89,7 +87,7 @@ class TranslationSocket(
         })
     }
 
-    fun sendPcm24k(bytes: ByteArray): Boolean {
+    override fun sendPcm24k(bytes: ByteArray): Boolean {
         if (!opened.get()) return false
         val ws = socket ?: return false
         if (ws.queueSize() > MAX_SOCKET_QUEUE_BYTES) {
@@ -108,7 +106,7 @@ class TranslationSocket(
         )
     }
 
-    fun close() {
+    override fun close() {
         if (opened.get()) socket?.send(JSONObject().put("type", "stop").toString())
         socket?.close(1000, "stop")
         opened.set(false)
