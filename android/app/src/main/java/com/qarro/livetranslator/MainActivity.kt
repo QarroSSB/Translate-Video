@@ -15,6 +15,7 @@ import android.provider.Settings
 import android.view.View
 import android.view.ViewGroup
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
@@ -169,6 +170,7 @@ class MainActivity : AppCompatActivity() {
         runCatching {
             videoWebView?.stopLoading()
             videoWebView?.loadUrl("about:blank")
+            videoWebView?.removeJavascriptInterface("QarroPlayer")
             videoWebView?.removeAllViews()
             videoWebView?.destroy()
             videoWebView = null
@@ -179,6 +181,9 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun ensureWebView(): WebView {
         videoWebView?.let { return it }
+
+        val provider = runCatching { WebView.getCurrentWebViewPackage() }.getOrNull()
+            ?: throw IllegalStateException("Android System WebView недоступен")
 
         val webView = WebView(this).apply {
             layoutParams = ViewGroup.LayoutParams(
@@ -191,6 +196,7 @@ class MainActivity : AppCompatActivity() {
                 mediaPlaybackRequiresUserGesture = true
                 allowFileAccess = false
                 allowContentAccess = false
+                javaScriptCanOpenWindowsAutomatically = false
             }
             webChromeClient = WebChromeClient()
             webViewClient = object : WebViewClient() {
@@ -201,10 +207,11 @@ class MainActivity : AppCompatActivity() {
                 ) {
                     super.onReceivedError(view, request, error)
                     if (request?.isForMainFrame == true) {
-                        binding.status.text = "Статус: не удалось открыть встроенное видео — ${error?.description ?: "ошибка"}"
+                        binding.status.text = "Статус: WebView ${provider.versionName} — ${error?.description ?: "ошибка загрузки"}"
                     }
                 }
             }
+            addJavascriptInterface(PlayerJsBridge(), "QarroPlayer")
         }
 
         CookieManager.getInstance().apply {
@@ -223,6 +230,29 @@ class MainActivity : AppCompatActivity() {
         binding.videoContainer.addView(webView)
         videoWebView = webView
         return webView
+    }
+
+    private inner class PlayerJsBridge {
+        @JavascriptInterface
+        fun ready() {
+            runOnUiThread {
+                binding.status.text = "Статус: YouTube-плеер готов"
+            }
+        }
+
+        @JavascriptInterface
+        fun error(code: Int) {
+            runOnUiThread {
+                binding.status.text = when (code) {
+                    2 -> "Статус: YouTube error 2 — неверный ID видео"
+                    5 -> "Статус: YouTube error 5 — ошибка HTML5-плеера"
+                    100 -> "Статус: YouTube error 100 — видео удалено или приватное"
+                    101, 150 -> "Статус: YouTube error $code — автор запретил встраивание"
+                    153 -> "Статус: YouTube error 153 — YouTube не получил идентификацию встроенного клиента"
+                    else -> "Статус: YouTube player error $code"
+                }
+            }
+        }
     }
 
     private fun saveApiKey() {
@@ -313,10 +343,52 @@ class MainActivity : AppCompatActivity() {
             binding.status.text = "Статус: WebView не запустился — ${error.message ?: "ошибка"}"
             return
         }
-        val embed = "https://www.youtube.com/embed/$videoId?playsinline=1&rel=0&autoplay=0&enablejsapi=1"
+
+        val origin = "https://qarro.local"
+        val encodedOrigin = Uri.encode(origin)
+        val embedUrl = "https://www.youtube.com/embed/$videoId" +
+            "?playsinline=1&rel=0&autoplay=0&enablejsapi=1&origin=$encodedOrigin"
+
+        val html = """
+            <!doctype html>
+            <html>
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+              <meta name="referrer" content="strict-origin-when-cross-origin">
+              <style>
+                html, body { margin:0; width:100%; height:100%; background:#000; overflow:hidden; }
+                #player { width:100%; height:100%; border:0; }
+              </style>
+            </head>
+            <body>
+              <iframe id="player"
+                src="$embedUrl"
+                referrerpolicy="strict-origin-when-cross-origin"
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                allowfullscreen></iframe>
+              <script>
+                window.addEventListener('message', function(event) {
+                  try {
+                    var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
+                    if (data && data.event === 'onReady') QarroPlayer.ready();
+                    if (data && data.event === 'onError' && data.info !== undefined) QarroPlayer.error(parseInt(data.info));
+                  } catch (e) {}
+                });
+              </script>
+            </body>
+            </html>
+        """.trimIndent()
+
         binding.videoContainer.visibility = View.VISIBLE
-        webView.loadUrl(embed)
-        binding.status.text = "Статус: видео загружается. Затем нажми «Начать перевод» и запусти Play."
+        webView.loadDataWithBaseURL(
+            "$origin/player/",
+            html,
+            "text/html",
+            "UTF-8",
+            null
+        )
+        binding.status.text = "Статус: загружаю YouTube через страницу с Referer…"
     }
 
     private fun handleIncomingIntent(incoming: Intent?) {
