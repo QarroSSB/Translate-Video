@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Qarro Live Translator</string>
+    <string name="channel_name">Live translation</string>
+    <string name="channel_description">Playback capture and translated audio</string>
+</resources>
