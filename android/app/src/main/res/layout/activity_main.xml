@@ -21,23 +21,112 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="v0.3 • автоязык → русский дубляж + субтитры"
+            android:text="v0.4 • ссылка YouTube → встроенный плеер → русский перевод"
             android:textSize="15sp" />
 
-        <EditText
-            android:id="@+id/endpoint"
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:hint="ws://192.168.1.2:8765/ws/translate"
+            android:text="Видео"
+            android:textStyle="bold" />
+
+        <EditText
+            android:id="@+id/videoUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Вставь ссылку YouTube или нажми Поделиться → Qarro"
             android:inputType="textUri"
             android:singleLine="true" />
 
         <Button
-            android:id="@+id/testServer"
+            android:id="@+id/openVideo"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Проверить сервер" />
+            android:text="▶ Открыть видео в Qarro Translator" />
+
+        <WebView
+            android:id="@+id/videoWebView"
+            android:layout_width="match_parent"
+            android:layout_height="220dp"
+            android:layout_marginTop="8dp"
+            android:visibility="gone" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="Подключение перевода"
+            android:textStyle="bold" />
+
+        <RadioGroup
+            android:id="@+id/connectionGroup"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <RadioButton
+                android:id="@+id/connectionDirect"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:text="📱 Phone-Only — без ПК, Termux и локального сервера" />
+
+            <RadioButton
+                android:id="@+id/connectionServer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="🛠 Advanced Server — текущий Multi-voice backend" />
+        </RadioGroup>
+
+        <LinearLayout
+            android:id="@+id/directSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <EditText
+                android:id="@+id/apiKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="OpenAI API key"
+                android:inputType="textPassword"
+                android:singleLine="true" />
+
+            <Button
+                android:id="@+id/saveApiKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Сохранить ключ на телефоне" />
+
+            <TextView
+                android:id="@+id/apiKeyStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="API key: не сохранён"
+                android:textSize="13sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/serverSettings"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <EditText
+                android:id="@+id/endpoint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="ws://127.0.0.1:8765/ws/translate"
+                android:inputType="textUri"
+                android:singleLine="true" />
+
+            <Button
+                android:id="@+id/testServer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Проверить сервер" />
+        </LinearLayout>
 
         <EditText
             android:id="@+id/targetLanguage"
@@ -91,7 +180,7 @@
             android:id="@+id/modeHint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Live переводит быстрее. Multi-voice требует несколько секунд для определения говорящих и эмоций. В обычном YouTube приложение не может автоматически задержать само видео."
+            android:text="Phone-Only v0.4 пока использует Live. Multi-voice остаётся доступен через Advanced Server и будет перенесён на телефон следующим этапом."
             android:textSize="13sp" />
 
         <TextView
@@ -112,14 +201,14 @@
             android:id="@+id/duckOriginal"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Просить Android приглушать оригинальный звук во время перевода" />
+            android:text="Приглушать оригинальный звук во время русского голоса" />
 
         <CheckBox
             android:id="@+id/showOverlay"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:checked="true"
-            android:text="Показывать русские субтитры поверх YouTube" />
+            android:text="Показывать русские субтитры поверх видео" />
 
         <Button
             android:id="@+id/overlayPermission"
@@ -153,6 +242,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="Важно: Android может захватывать звук другого приложения только если это приложение разрешает Audio Playback Capture. Приглушение оригинала через Audio Focus также зависит от поведения приложения-источника." />
+            android:text="Для первого теста: вставь ссылку, открой видео, сохрани API key, нажми «Начать перевод», разреши захват экрана/звука, затем запусти воспроизведение видео." />
     </LinearLayout>
 </ScrollView>
