@@ -21,7 +21,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="v0.4 • ссылка YouTube → встроенный плеер → русский перевод"
+            android:text="v0.4.1 • Phone-Only startup-safe"
             android:textSize="15sp" />
 
         <TextView
@@ -45,8 +45,8 @@
             android:layout_height="wrap_content"
             android:text="▶ Открыть видео в Qarro Translator" />
 
-        <WebView
-            android:id="@+id/videoWebView"
+        <FrameLayout
+            android:id="@+id/videoContainer"
             android:layout_width="match_parent"
             android:layout_height="220dp"
             android:layout_marginTop="8dp"
@@ -180,7 +180,7 @@
             android:id="@+id/modeHint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Phone-Only v0.4 пока использует Live. Multi-voice остаётся доступен через Advanced Server и будет перенесён на телефон следующим этапом."
+            android:text="Phone-Only использует Live. Multi-voice пока доступен через Advanced Server."
             android:textSize="13sp" />
 
         <TextView
@@ -242,6 +242,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="Для первого теста: вставь ссылку, открой видео, сохрани API key, нажми «Начать перевод», разреши захват экрана/звука, затем запусти воспроизведение видео." />
+            android:text="Для теста: вставь ссылку, открой видео, сохрани API key, нажми «Начать перевод», разреши захват, затем запусти видео." />
     </LinearLayout>
 </ScrollView>
