@@ -9,7 +9,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <application
+        android:allowAudioPlaybackCapture="true"
         android:allowBackup="true"
+        android:hardwareAccelerated="true"
         android:label="Qarro Live Translator"
         android:supportsRtl="true"
         android:theme="@style/Theme.QarroLiveTranslator"
@@ -21,6 +23,12 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
             </intent-filter>
         </activity>
 
