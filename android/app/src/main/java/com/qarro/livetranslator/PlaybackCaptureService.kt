@@ -26,6 +26,8 @@ class PlaybackCaptureService : Service() {
     companion object {
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
+        const val EXTRA_CONNECTION_MODE = "connection_mode"
+        const val EXTRA_API_KEY = "api_key"
         const val EXTRA_ENDPOINT = "endpoint"
         const val EXTRA_TARGET_LANGUAGE = "target_language"
         const val EXTRA_MODE = "mode"
@@ -42,7 +44,7 @@ class PlaybackCaptureService : Service() {
     private val executor = Executors.newSingleThreadExecutor()
     private var projection: MediaProjection? = null
     private var recorder: AudioRecord? = null
-    private var socket: TranslationSocket? = null
+    private var socket: AudioTranslationClient? = null
     private var player: PcmAudioPlayer? = null
     private var overlay: SubtitleOverlay? = null
 
@@ -74,9 +76,12 @@ class PlaybackCaptureService : Service() {
             @Suppress("DEPRECATION")
             intent?.getParcelableExtra(EXTRA_RESULT_DATA)
         }
-        val endpoint = intent?.getStringExtra(EXTRA_ENDPOINT) ?: "ws://10.0.2.2:8765/ws/translate"
+        val connectionMode = intent?.getStringExtra(EXTRA_CONNECTION_MODE) ?: "direct"
+        val apiKey = intent?.getStringExtra(EXTRA_API_KEY).orEmpty()
+        val endpoint = intent?.getStringExtra(EXTRA_ENDPOINT) ?: "ws://127.0.0.1:8765/ws/translate"
         val target = intent?.getStringExtra(EXTRA_TARGET_LANGUAGE) ?: "ru"
-        val mode = intent?.getStringExtra(EXTRA_MODE) ?: "live"
+        val requestedMode = intent?.getStringExtra(EXTRA_MODE) ?: "live"
+        val mode = if (connectionMode == "direct") "live" else requestedMode
         val chunkMs = intent?.getIntExtra(EXTRA_CHUNK_MS, 6000)?.coerceIn(3000, 12000) ?: 6000
         val showOverlay = intent?.getBooleanExtra(EXTRA_SHOW_OVERLAY, true) ?: true
         val translationVolume = intent?.getIntExtra(EXTRA_TRANSLATION_VOLUME, 100)?.coerceIn(0, 100) ?: 100
@@ -86,10 +91,24 @@ class PlaybackCaptureService : Service() {
             stopSelf()
             return START_NOT_STICKY
         }
+        if (connectionMode == "direct" && apiKey.isBlank()) {
+            updateNotification("Ошибка: OpenAI API key не задан")
+            stopSelf()
+            return START_NOT_STICKY
+        }
 
         startTranslation(
-            resultCode, resultData, endpoint, target, mode, chunkMs, showOverlay,
-            translationVolume, duckOriginal
+            resultCode = resultCode,
+            resultData = resultData,
+            connectionMode = connectionMode,
+            apiKey = apiKey,
+            endpoint = endpoint,
+            target = target,
+            mode = mode,
+            chunkMs = chunkMs,
+            showOverlay = showOverlay,
+            translationVolume = translationVolume,
+            duckOriginal = duckOriginal,
         )
         return START_NOT_STICKY
     }
@@ -97,6 +116,8 @@ class PlaybackCaptureService : Service() {
     private fun startTranslation(
         resultCode: Int,
         resultData: Intent,
+        connectionMode: String,
+        apiKey: String,
         endpoint: String,
         target: String,
         mode: String,
@@ -111,28 +132,49 @@ class PlaybackCaptureService : Service() {
             overlay = SubtitleOverlay(this).also { it.show() }
         }
         player = PcmAudioPlayer(this, translationVolume, duckOriginal)
-        socket = TranslationSocket(
-            endpoint = endpoint,
-            targetLanguage = target,
-            mode = mode,
-            chunkMs = chunkMs,
-            onAudio = { bytes -> player?.write(bytes) },
-            onTargetTranscript = { delta -> overlay?.append(delta) },
-            onSpeakerLine = { speaker, emotion, translation ->
-                overlay?.showSpeakerLine(speaker, emotion, translation)
-            },
-            onStatus = { state ->
-                if (state == "connected") overlay?.setStatus("Перевод подключён…")
-                updateNotification("Перевод: $state")
-            },
-            onMetric = { metric ->
-                updateNotification("Перевод • $metric")
-            },
-            onError = { message ->
-                overlay?.setStatus("Ошибка: $message")
-                updateNotification("Ошибка: ${message.take(50)}")
-            },
-        ).also { it.connect() }
+
+        val onAudio: (ByteArray) -> Unit = { bytes -> player?.write(bytes) }
+        val onTranscript: (String) -> Unit = { delta -> overlay?.append(delta) }
+        val onStatus: (String) -> Unit = { state ->
+            if (state == "connected" || state == "ready") {
+                overlay?.setStatus("Перевод подключён…")
+            }
+            updateNotification("Перевод: $state")
+        }
+        val onMetric: (String) -> Unit = { metric ->
+            updateNotification("Перевод • $metric")
+        }
+        val onError: (String) -> Unit = { message ->
+            overlay?.setStatus("Ошибка: $message")
+            updateNotification("Ошибка: ${message.take(50)}")
+        }
+
+        socket = if (connectionMode == "direct") {
+            DirectTranslationSocket(
+                apiKey = apiKey,
+                targetLanguage = target,
+                onAudio = onAudio,
+                onTargetTranscript = onTranscript,
+                onStatus = onStatus,
+                onMetric = onMetric,
+                onError = onError,
+            )
+        } else {
+            TranslationSocket(
+                endpoint = endpoint,
+                targetLanguage = target,
+                mode = mode,
+                chunkMs = chunkMs,
+                onAudio = onAudio,
+                onTargetTranscript = onTranscript,
+                onSpeakerLine = { speaker, emotion, translation ->
+                    overlay?.showSpeakerLine(speaker, emotion, translation)
+                },
+                onStatus = onStatus,
+                onMetric = onMetric,
+                onError = onError,
+            )
+        }.also { it.connect() }
 
         val manager = getSystemService(MediaProjectionManager::class.java)
         projection = manager.getMediaProjection(resultCode, resultData).also { mediaProjection ->
@@ -169,12 +211,13 @@ class PlaybackCaptureService : Service() {
 
         executor.execute {
             val local = recorder ?: return@execute
-            val buffer = ShortArray(4_800) // 100 ms @ 48 kHz
+            val buffer = ShortArray(9_600) // 200 ms @ 48 kHz; Realtime Translation engine frame size.
             var blocks = 0
             var audibleBlocks = 0
             try {
                 local.startRecording()
-                updateNotification("Перевод активен • $mode")
+                val connectionLabel = if (connectionMode == "direct") "phone-only" else "server"
+                updateNotification("Перевод активен • $connectionLabel • $mode")
                 while (running.get()) {
                     val count = local.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
                     if (count > 0) {
@@ -186,8 +229,10 @@ class PlaybackCaptureService : Service() {
                         val downsampled = PcmResampler.downsample48kTo24k(buffer, count)
                         socket?.sendPcm24k(PcmResampler.shortsToLittleEndianBytes(downsampled))
 
-                        if (blocks == 50 && audibleBlocks == 0) {
-                            overlay?.setStatus("Входной звук не обнаружен. Возможно, YouTube запрещает захват аудио.")
+                        if (blocks == 25 && audibleBlocks == 0) {
+                            overlay?.setStatus(
+                                "Входной звук не обнаружен. Запусти видео во встроенном плеере или проверь разрешение захвата."
+                            )
                             updateNotification("Не обнаружен звук приложения")
                         }
                     }
