@@ -11,8 +11,8 @@ android {
         applicationId = "com.qarro.livetranslator"
         minSdk = 29
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.5.5"
+        versionCode = 15
+        versionName = "0.5.6"
         ndk {
             abiFilters += listOf("arm64-v8a")
         }
