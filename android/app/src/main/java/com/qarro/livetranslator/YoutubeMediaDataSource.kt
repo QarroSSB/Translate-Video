@@ -76,15 +76,15 @@ class YoutubeMediaDataSource private constructor(
         }
 
         var position = original.position
-        var requestedLength = original.length
+        val requestedLength = original.length
         if (rangeParameterEnabled && original.position >= 0) {
-            val end = if (original.length != C.LENGTH_UNSET && original.length > 0) {
+            val end = if (original.length != C.LENGTH_UNSET.toLong() && original.length > 0) {
                 original.position + original.length - 1
             } else {
                 ""
             }
             url = appendRawQuery(url, "range=${original.position}-$end")
-            // The server response is now already the requested range. Prevent DefaultHttpDataSource
+            // The server response is already the requested range. Prevent DefaultHttpDataSource
             // from adding a second Range header / skipping original.position bytes again.
             position = 0
         }
