@@ -1,5 +1,8 @@
 package com.qarro.livetranslator
 
+import android.content.Context
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import org.schabi.newpipe.extractor.MediaFormat
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.ServiceList
@@ -36,8 +39,8 @@ data class ResolvedYouTubeStream(
         get() = variants.firstOrNull()?.label ?: "авто"
 }
 
-/** Resolves a YouTube watch/share URL to playable Media3 variants. */
-class YouTubeStreamResolver : Closeable {
+/** Resolves a YouTube URL. Fast path: NewPipe. Fallback: on-device yt-dlp. */
+class YouTubeStreamResolver(context: Context? = null) : Closeable {
     companion object {
         private val initialized = AtomicBoolean(false)
 
@@ -49,21 +52,138 @@ class YouTubeStreamResolver : Closeable {
         }
     }
 
+    private val appContext = context?.applicationContext
     private val executor = Executors.newSingleThreadExecutor()
 
-    fun resolve(url: String, callback: (Result<ResolvedYouTubeStream>) -> Unit) {
+    fun resolve(
+        url: String,
+        onProgress: (String) -> Unit = {},
+        callback: (Result<ResolvedYouTubeStream>) -> Unit,
+    ) {
         executor.execute {
-            val result = runCatching { resolveBlocking(url) }
-                .recoverCatching { error ->
-                    val detail = error.message?.take(220).orEmpty()
-                    val base = if (detail.isBlank()) error.javaClass.simpleName else "${error.javaClass.simpleName}: $detail"
-                    throw IllegalStateException("$base • ${QarroDownloader.lastDiagnostic}", error)
-                }
-            callback(result)
+            onProgress("NewPipe: получаю метаданные YouTube…")
+            val primary = runCatching { resolveBlocking(url) }
+            if (primary.isSuccess) {
+                onProgress("NewPipe: поток найден ✓")
+                callback(primary)
+                return@execute
+            }
+
+            val primaryError = primary.exceptionOrNull()
+            val context = appContext
+            if (context == null) {
+                callback(Result.failure(wrapPrimaryFailure(primaryError)))
+                return@execute
+            }
+
+            onProgress("NewPipe не получил поток • переключаюсь на yt-dlp…")
+            val fallback = runCatching { resolveWithYtDlp(context, url, onProgress) }
+            if (fallback.isSuccess) {
+                onProgress("yt-dlp: поток найден ✓")
+                callback(fallback)
+            } else {
+                val fallbackError = fallback.exceptionOrNull()
+                val p = primaryError?.message?.take(180) ?: primaryError?.javaClass?.simpleName ?: "unknown"
+                val f = fallbackError?.message?.take(220) ?: fallbackError?.javaClass?.simpleName ?: "unknown"
+                callback(
+                    Result.failure(
+                        IllegalStateException(
+                            "Оба способа не получили видео. NewPipe: $p • yt-dlp: $f • ${QarroDownloader.lastDiagnostic}",
+                            fallbackError,
+                        ),
+                    ),
+                )
+            }
         }
     }
 
     internal fun resolveBlockingForDiagnostics(url: String): ResolvedYouTubeStream = resolveBlocking(url)
+
+    private fun wrapPrimaryFailure(error: Throwable?): Throwable {
+        val detail = error?.message?.take(220).orEmpty()
+        val base = if (detail.isBlank()) {
+            error?.javaClass?.simpleName ?: "unknown extractor error"
+        } else {
+            "${error?.javaClass?.simpleName}: $detail"
+        }
+        return IllegalStateException("$base • ${QarroDownloader.lastDiagnostic}", error)
+    }
+
+    private fun resolveWithYtDlp(
+        context: Context,
+        url: String,
+        onProgress: (String) -> Unit,
+    ): ResolvedYouTubeStream {
+        val youtubeDL = YoutubeDL.getInstance()
+        onProgress("yt-dlp: инициализирую движок на телефоне…")
+        youtubeDL.init(context)
+
+        val prefs = context.getSharedPreferences("qarro_live_translator", Context.MODE_PRIVATE)
+        val lastUpdate = prefs.getLong("ytdlp_last_update_ms", 0L)
+        val now = System.currentTimeMillis()
+        if (now - lastUpdate > 24L * 60L * 60L * 1000L) {
+            onProgress("yt-dlp: проверяю актуальную версию…")
+            runCatching {
+                youtubeDL.updateYoutubeDL(context, YoutubeDL.UpdateChannel._STABLE)
+            }.onSuccess {
+                prefs.edit().putLong("ytdlp_last_update_ms", now).apply()
+            }
+        }
+
+        onProgress("yt-dlp: извлекаю playable URL…")
+        val request = YoutubeDLRequest(url).apply {
+            addOption("--no-playlist")
+            addOption("--no-warnings")
+            // Prefer one MP4 file containing both video and audio. This avoids FFmpeg and keeps
+            // the PCM tap inside Media3. Fall back to yt-dlp's best single-file stream.
+            addOption("-f", "best[ext=mp4]/best")
+        }
+        val info = youtubeDL.getInfo(request)
+
+        val direct = info.url?.takeIf { it.isNotBlank() }
+        if (direct != null) {
+            return ResolvedYouTubeStream(
+                title = info.title ?: info.fulltitle ?: "YouTube video",
+                variants = listOf(
+                    YouTubePlaybackVariant(
+                        mode = YouTubePlaybackMode.COMBINED,
+                        videoUrl = direct,
+                        videoMimeType = mimeForVideoExt(info.ext),
+                        label = "yt-dlp • ${info.resolution ?: info.format ?: "single stream"}",
+                    ),
+                ),
+                durationSeconds = info.duration.toLong(),
+            )
+        }
+
+        val requested = info.requestedFormats.orEmpty()
+        val video = requested.firstOrNull { format ->
+            !format.url.isNullOrBlank() && !format.vcodec.isNullOrBlank() && format.vcodec != "none" &&
+                (format.acodec.isNullOrBlank() || format.acodec == "none")
+        }
+        val audio = requested.firstOrNull { format ->
+            !format.url.isNullOrBlank() && !format.acodec.isNullOrBlank() && format.acodec != "none" &&
+                (format.vcodec.isNullOrBlank() || format.vcodec == "none")
+        }
+        if (video?.url != null && audio?.url != null) {
+            return ResolvedYouTubeStream(
+                title = info.title ?: info.fulltitle ?: "YouTube video",
+                variants = listOf(
+                    YouTubePlaybackVariant(
+                        mode = YouTubePlaybackMode.SEPARATE,
+                        videoUrl = video.url!!,
+                        audioUrl = audio.url!!,
+                        videoMimeType = mimeForVideoExt(video.ext),
+                        audioMimeType = mimeForAudioExt(audio.ext),
+                        label = "yt-dlp • ${video.height.takeIf { it > 0 }?.let { "${it}p" } ?: "adaptive"}",
+                    ),
+                ),
+                durationSeconds = info.duration.toLong(),
+            )
+        }
+
+        throw IllegalStateException("yt-dlp вернул метаданные, но без playable URL")
+    }
 
     private fun resolveBlocking(url: String): ResolvedYouTubeStream {
         ensureInitialized()
@@ -181,6 +301,18 @@ class YouTubeStreamResolver : Closeable {
         return stream.resolution.ifBlank {
             effectiveHeight(stream).takeIf { it > 0 }?.let { "${it}p" } ?: "video"
         }
+    }
+
+    private fun mimeForVideoExt(ext: String?): String? = when (ext?.lowercase()) {
+        "mp4", "m4v" -> "video/mp4"
+        "webm" -> "video/webm"
+        else -> null
+    }
+
+    private fun mimeForAudioExt(ext: String?): String? = when (ext?.lowercase()) {
+        "m4a", "mp4" -> "audio/mp4"
+        "webm", "weba" -> "audio/webm"
+        else -> null
     }
 
     override fun close() {
