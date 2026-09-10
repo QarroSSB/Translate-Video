@@ -7,6 +7,7 @@ import com.yausername.youtubedl_android.mapper.VideoInfo
 import org.schabi.newpipe.extractor.MediaFormat
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.ServiceList
+import org.schabi.newpipe.extractor.services.youtube.extractors.YoutubeStreamExtractor
 import org.schabi.newpipe.extractor.stream.AudioStream
 import org.schabi.newpipe.extractor.stream.DeliveryMethod
 import org.schabi.newpipe.extractor.stream.StreamInfo
@@ -42,7 +43,7 @@ data class ResolvedYouTubeStream(
 
 /**
  * Resolves a YouTube URL entirely on the phone.
- * Order: NewPipe -> on-device BotGuard/PO-token WEB_EMBEDDED -> yt-dlp -> cookies.txt.
+ * Order: NewPipe + standard WEB two-token BotGuard provider -> WEB_EMBEDDED fallback -> yt-dlp -> cookies.txt.
  */
 class YouTubeStreamResolver(context: Context? = null) : Closeable {
     companion object {
@@ -58,6 +59,7 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
 
     private val appContext = context?.applicationContext
     private val executor = Executors.newSingleThreadExecutor()
+    private val webPoTokenProvider = appContext?.let { NewPipeWebPoTokenProvider(it) }
     private val poTokenResolver = appContext?.let { YouTubePoTokenResolver(it) }
 
     fun resolve(
@@ -67,10 +69,20 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
     ) {
         executor.execute {
             ensureInitialized()
-            onProgress("NewPipe: получаю метаданные YouTube…")
+
+            webPoTokenProvider?.setProgressListener(onProgress)
+            YoutubeStreamExtractor.setPoTokenProvider(webPoTokenProvider)
+            onProgress(
+                if (webPoTokenProvider != null) {
+                    "NewPipe + WEB PO Token: получаю поток YouTube…"
+                } else {
+                    "NewPipe: получаю метаданные YouTube…"
+                },
+            )
+
             val primary = runCatching { resolveBlocking(url) }
             if (primary.isSuccess) {
-                onProgress("NewPipe: поток найден ✓")
+                onProgress("NewPipe + WEB PO Token: поток найден ✓")
                 callback(primary)
                 return@execute
             }
@@ -82,7 +94,10 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
                 return@execute
             }
 
-            onProgress("NewPipe получил anti-bot • пробую PO Token через WebView…")
+            // Keep v0.5.7's WEB_EMBEDDED path only as a secondary diagnostic/fallback.
+            // The user's real-device test returned ERROR / "This video is unavailable" on it,
+            // so the standard WEB two-token flow above now gets first priority.
+            onProgress("WEB PO Token не снял блокировку • пробую WEB_EMBEDDED как резерв…")
             val poResult = runCatching {
                 poTokenResolver?.resolve(url, onProgress)
                     ?: throw IllegalStateException("PO Token resolver недоступен")
@@ -93,7 +108,7 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
             }
             val poError = poResult.exceptionOrNull()
 
-            onProgress("PO Token не получил поток • переключаюсь на yt-dlp…")
+            onProgress("Оба PO-token пути не получили поток • переключаюсь на yt-dlp…")
             val fallback = runCatching { resolveWithYtDlp(context, url, onProgress) }
             if (fallback.isSuccess) {
                 onProgress("yt-dlp: поток найден ✓")
@@ -105,8 +120,8 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
             callback(
                 Result.failure(
                     IllegalStateException(
-                        "Не удалось открыть YouTube. NewPipe: ${shortError(primaryError)} • " +
-                            "PO Token: ${shortError(poError)} • yt-dlp: ${shortError(fallbackError)}",
+                        "Не удалось открыть YouTube. NewPipe+WEB-PO: ${shortError(primaryError)} • " +
+                            "WEB_EMBEDDED: ${shortError(poError)} • yt-dlp: ${shortError(fallbackError)}",
                         fallbackError,
                     ),
                 ),
@@ -116,6 +131,7 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
 
     internal fun resolveBlockingForDiagnostics(url: String): ResolvedYouTubeStream {
         ensureInitialized()
+        YoutubeStreamExtractor.setPoTokenProvider(webPoTokenProvider)
         return resolveBlocking(url)
     }
 
@@ -186,7 +202,7 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
             joined.contains("sign in", ignoreCase = true)
         if (botGate && cookiePath == null) {
             throw IllegalStateException(
-                "YouTube всё ещё требует Sign in после PO-token fallback. cookies.txt остаётся резервом. $joined",
+                "YouTube всё ещё требует Sign in после WEB PO-token fallback. cookies.txt остаётся резервом. $joined",
             )
         }
         throw IllegalStateException(joined.ifBlank { "yt-dlp не вернул playable URL" })
@@ -345,6 +361,8 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
     }
 
     override fun close() {
+        YoutubeStreamExtractor.setPoTokenProvider(null)
+        webPoTokenProvider?.close()
         poTokenResolver?.close()
         executor.shutdownNow()
     }
