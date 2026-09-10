@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.view.View
 import android.widget.SeekBar
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.util.UnstableApi
 import com.qarro.livetranslator.databinding.ActivityMainBinding
@@ -14,8 +15,21 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val prefs by lazy { getSharedPreferences("qarro_live_translator", MODE_PRIVATE) }
     private val apiKeyStore by lazy { ApiKeyStore(this) }
+    private val cookieStore by lazy { YouTubeCookieStore(this) }
     private val serverProbe = ServerProbe()
     private val resolver by lazy { YouTubeStreamResolver(applicationContext) }
+
+    private val cookiePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@registerForActivityResult
+        cookieStore.importFrom(uri)
+            .onSuccess { count ->
+                updateCookieStatus()
+                showVideoStatus("YouTube cookies импортированы ($count записей) • повтори открытие видео", toast = true)
+            }
+            .onFailure { error ->
+                showVideoStatus("Не удалось импортировать cookies: ${error.message ?: "ошибка"}", toast = true)
+            }
+    }
 
     private lateinit var pcmBridge: InternalPcmBridge
     private lateinit var playerEngine: InternalPlayerEngine
@@ -67,6 +81,7 @@ class MainActivity : AppCompatActivity() {
         binding.volumeSeek.progress = prefs.getInt("translation_volume", 100).coerceIn(0, 100)
         updateVolumeLabel()
         updateApiKeyStatus()
+        updateCookieStatus()
 
         val connectionMode = prefs.getString("connection_mode", "direct")
         binding.connectionDirect.isChecked = connectionMode != "server"
@@ -104,6 +119,14 @@ class MainActivity : AppCompatActivity() {
             binding.internalSubtitle.visibility = if (checked && subtitleBuffer.isNotEmpty()) View.VISIBLE else View.GONE
         }
 
+        binding.importCookies.setOnClickListener {
+            cookiePicker.launch(arrayOf("text/plain", "application/octet-stream", "*/*"))
+        }
+        binding.clearCookies.setOnClickListener {
+            cookieStore.clear()
+            updateCookieStatus()
+            showVideoStatus("YouTube cookies удалены")
+        }
         binding.saveApiKey.setOnClickListener { saveApiKey() }
         binding.testServer.setOnClickListener { testServer() }
         binding.openVideo.setOnClickListener { openYouTubeVideo() }
@@ -162,8 +185,18 @@ class MainActivity : AppCompatActivity() {
     private fun showVideoStatus(message: String, toast: Boolean = false) {
         binding.status.text = "Статус: $message"
         if (toast) {
-            Toast.makeText(this, message.take(300), Toast.LENGTH_LONG).show()
+            Toast.makeText(this, message.take(320), Toast.LENGTH_LONG).show()
         }
+    }
+
+    private fun updateCookieStatus() {
+        val imported = runCatching { cookieStore.hasCookies() }.getOrDefault(false)
+        binding.cookieStatus.text = if (imported) {
+            "YouTube-сессия: cookies.txt импортирован ✓ • хранится только внутри приложения"
+        } else {
+            "YouTube-сессия: не импортирована • нужна только если YouTube пишет «не бот / Sign in»"
+        }
+        binding.clearCookies.isEnabled = imported
     }
 
     private fun startTranslation() {
