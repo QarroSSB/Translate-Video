@@ -11,8 +11,11 @@ android {
         applicationId = "com.qarro.livetranslator"
         minSdk = 29
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.5.3"
+        versionCode = 13
+        versionName = "0.5.4"
+        ndk {
+            abiFilters += listOf("arm64-v8a")
+        }
     }
 
     buildFeatures {
@@ -42,6 +45,7 @@ dependencies {
     implementation("androidx.media3:media3-datasource-okhttp:1.10.1")
 
     implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
+    implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")
     testImplementation("junit:junit:4.13.2")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 }
