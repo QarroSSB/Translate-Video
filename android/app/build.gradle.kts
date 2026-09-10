@@ -11,8 +11,8 @@ android {
         applicationId = "com.qarro.livetranslator"
         minSdk = 29
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.5.2"
+        versionCode = 12
+        versionName = "0.5.3"
     }
 
     buildFeatures {
@@ -42,5 +42,6 @@ dependencies {
     implementation("androidx.media3:media3-datasource-okhttp:1.10.1")
 
     implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
+    testImplementation("junit:junit:4.13.2")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
 }
