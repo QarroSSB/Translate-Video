@@ -7,7 +7,6 @@ import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.audio.AudioSink
@@ -117,7 +116,7 @@ class InternalPlayerEngine(
         player.setMediaSource(buildMediaSource(variant))
         player.prepare()
         player.playWhenReady = autoplay
-        onStatus("Открываю ${variant.label}…")
+        onStatus("Открываю ${variant.label} • YouTube transport…")
     }
 
     private fun currentVariant(): YouTubePlaybackVariant? {
@@ -125,39 +124,41 @@ class InternalPlayerEngine(
     }
 
     private fun buildMediaSource(variant: YouTubePlaybackVariant): MediaSource {
-        val httpDataSource = DefaultHttpDataSource.Factory()
-            .setUserAgent(QarroDownloader.USER_AGENT)
-            .setAllowCrossProtocolRedirects(true)
-            .setDefaultRequestProperties(
-                mapOf(
-                    "Referer" to "https://www.youtube.com/",
-                    "Origin" to "https://www.youtube.com",
-                    "Accept" to "*/*",
-                ),
-            )
+        val progressiveDataSource = YoutubeMediaDataSource.Factory(
+            rangeParameterEnabled = false,
+            rnParameterEnabled = true,
+        )
+        val dashDataSource = YoutubeMediaDataSource.Factory(
+            rangeParameterEnabled = true,
+            rnParameterEnabled = true,
+        )
+        val hlsDataSource = YoutubeMediaDataSource.Factory(
+            rangeParameterEnabled = false,
+            rnParameterEnabled = false,
+        )
 
         return when (variant.mode) {
             YouTubePlaybackMode.COMBINED -> {
-                ProgressiveMediaSource.Factory(httpDataSource)
+                ProgressiveMediaSource.Factory(progressiveDataSource)
                     .createMediaSource(mediaItem(variant.videoUrl, variant.videoMimeType, "combined"))
             }
 
             YouTubePlaybackMode.SEPARATE -> {
-                val videoSource = ProgressiveMediaSource.Factory(httpDataSource)
+                val videoSource = ProgressiveMediaSource.Factory(progressiveDataSource)
                     .createMediaSource(mediaItem(variant.videoUrl, variant.videoMimeType, "video"))
                 val audioUrl = requireNotNull(variant.audioUrl)
-                val audioSource = ProgressiveMediaSource.Factory(httpDataSource)
+                val audioSource = ProgressiveMediaSource.Factory(progressiveDataSource)
                     .createMediaSource(mediaItem(audioUrl, variant.audioMimeType, "audio"))
                 MergingMediaSource(true, videoSource, audioSource)
             }
 
             YouTubePlaybackMode.HLS -> {
-                HlsMediaSource.Factory(httpDataSource)
+                HlsMediaSource.Factory(hlsDataSource)
                     .createMediaSource(mediaItem(variant.videoUrl, null, "hls"))
             }
 
             YouTubePlaybackMode.DASH -> {
-                DashMediaSource.Factory(httpDataSource)
+                DashMediaSource.Factory(dashDataSource)
                     .createMediaSource(mediaItem(variant.videoUrl, null, "dash"))
             }
         }
@@ -176,7 +177,7 @@ class InternalPlayerEngine(
         while (cause.cause != null && cause.cause !== cause) {
             cause = cause.cause!!
         }
-        val detail = cause.message?.take(180).orEmpty()
+        val detail = cause.message?.take(220).orEmpty()
         return if (detail.isBlank()) error.errorCodeName else "${error.errorCodeName} • $detail"
     }
 
