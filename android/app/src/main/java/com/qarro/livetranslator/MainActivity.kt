@@ -15,7 +15,7 @@ class MainActivity : AppCompatActivity() {
     private val prefs by lazy { getSharedPreferences("qarro_live_translator", MODE_PRIVATE) }
     private val apiKeyStore by lazy { ApiKeyStore(this) }
     private val serverProbe = ServerProbe()
-    private val resolver = YouTubeStreamResolver()
+    private val resolver by lazy { YouTubeStreamResolver(applicationContext) }
 
     private lateinit var pcmBridge: InternalPcmBridge
     private lateinit var playerEngine: InternalPlayerEngine
@@ -127,10 +127,18 @@ class MainActivity : AppCompatActivity() {
 
         val canonicalUrl = "https://www.youtube.com/watch?v=$videoId"
         binding.openVideo.isEnabled = false
-        showVideoStatus("шаг 1/3 • обращаюсь к YouTube Extractor…")
-        binding.audioTapStatus.text = "Диагностика YouTube: запрос метаданных…"
+        showVideoStatus("шаг 1/3 • получаю поток YouTube…")
+        binding.audioTapStatus.text = "Диагностика YouTube: запуск resolver…"
 
-        resolver.resolve(canonicalUrl) { result ->
+        resolver.resolve(
+            canonicalUrl,
+            onProgress = { progress ->
+                runOnUiThread {
+                    binding.status.text = "Статус: $progress"
+                    binding.audioTapStatus.text = "Диагностика YouTube: $progress"
+                }
+            },
+        ) { result ->
             runOnUiThread {
                 binding.openVideo.isEnabled = true
                 result.onSuccess { stream ->
@@ -139,13 +147,13 @@ class MainActivity : AppCompatActivity() {
                     binding.internalSubtitle.text = ""
                     binding.internalSubtitle.visibility = View.GONE
                     binding.audioTapStatus.text =
-                        "Диагностика YouTube: extractor OK • вариантов ${stream.variants.size} • запускаю Media3"
+                        "Диагностика YouTube: поток OK • ${stream.resolution} • запускаю Media3"
                     showVideoStatus("шаг 2/3 • поток найден • открываю плеер…")
                     playerEngine.load(stream)
                 }.onFailure { error ->
                     val message = error.message ?: error.javaClass.simpleName
                     binding.audioTapStatus.text = "Диагностика YouTube: $message"
-                    showVideoStatus("Extractor не получил видео: $message", toast = true)
+                    showVideoStatus("Не удалось открыть видео: $message", toast = true)
                 }
             }
         }
