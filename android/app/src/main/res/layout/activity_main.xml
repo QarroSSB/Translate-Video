@@ -21,7 +21,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="v0.5.5 • Internal Player • без захвата звука Android"
+            android:text="v0.5.6 • Internal Player • без захвата звука Android"
             android:textSize="15sp" />
 
         <TextView
@@ -44,6 +44,14 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="▶ Получить и открыть видео" />
+
+        <Button
+            android:id="@+id/openViaProxy"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="🌐 Открыть через публичный proxy"
+            android:visibility="gone" />
 
         <TextView
             android:id="@+id/cookieStatus"
@@ -76,7 +84,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Нужно только если YouTube требует Sign in / «подтвердите, что вы не бот». Cookies остаются в приватном хранилище приложения."
+            android:text="Если YouTube требует Sign in / «подтвердите, что вы не бот», можно импортировать cookies.txt. Резервная кнопка proxy использует сторонний публичный Invidious-сервер; видеопоток в этом режиме идёт через него."
             android:textSize="12sp" />
 
         <FrameLayout
@@ -292,6 +300,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="v0.5.5 не запрашивает запись экрана или захват звука. Аудио для перевода берётся непосредственно из декодера встроенного Media3-плеера." />
+            android:text="v0.5.6 не запрашивает запись экрана или захват звука. Аудио для перевода берётся непосредственно из декодера встроенного Media3-плеера." />
     </LinearLayout>
 </ScrollView>
