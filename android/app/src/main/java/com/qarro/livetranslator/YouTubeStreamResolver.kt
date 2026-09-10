@@ -3,6 +3,7 @@ package com.qarro.livetranslator
 import android.content.Context
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import com.yausername.youtubedl_android.mapper.VideoInfo
 import org.schabi.newpipe.extractor.MediaFormat
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.ServiceList
@@ -39,7 +40,10 @@ data class ResolvedYouTubeStream(
         get() = variants.firstOrNull()?.label ?: "авто"
 }
 
-/** Resolves a YouTube URL. Fast path: NewPipe. Fallback: on-device yt-dlp. */
+/**
+ * Resolves a YouTube URL on-device.
+ * Fast path: NewPipe. Fallbacks: yt-dlp guest web_embedded, then authenticated yt-dlp cookies.
+ */
 class YouTubeStreamResolver(context: Context? = null) : Closeable {
     companion object {
         private val initialized = AtomicBoolean(false)
@@ -84,11 +88,11 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
             } else {
                 val fallbackError = fallback.exceptionOrNull()
                 val p = primaryError?.message?.take(180) ?: primaryError?.javaClass?.simpleName ?: "unknown"
-                val f = fallbackError?.message?.take(220) ?: fallbackError?.javaClass?.simpleName ?: "unknown"
+                val f = fallbackError?.message?.take(280) ?: fallbackError?.javaClass?.simpleName ?: "unknown"
                 callback(
                     Result.failure(
                         IllegalStateException(
-                            "Оба способа не получили видео. NewPipe: $p • yt-dlp: $f • ${QarroDownloader.lastDiagnostic}",
+                            "Не удалось открыть YouTube. NewPipe: $p • yt-dlp: $f",
                             fallbackError,
                         ),
                     ),
@@ -130,26 +134,87 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
             }
         }
 
-        onProgress("yt-dlp: извлекаю playable URL…")
-        val request = YoutubeDLRequest(url).apply {
-            addOption("--no-playlist")
-            addOption("--no-warnings")
-            // Prefer one MP4 file containing both video and audio. This avoids FFmpeg and keeps
-            // the PCM tap inside Media3. Fall back to yt-dlp's best single-file stream.
+        val failures = mutableListOf<String>()
+
+        // First try a client that currently does not require a GVS PO token for embeddable videos.
+        // Skipping the normal webpage also avoids the anonymous-watch bot gate on some IPs.
+        onProgress("yt-dlp: пробую гостевой web_embedded…")
+        val guestRequest = baseYtDlpRequest(url).apply {
+            addOption("--extractor-args", "youtube:player_client=web_embedded;player_skip=webpage,configs")
             addOption("-f", "best[ext=mp4]/best")
         }
-        val info = youtubeDL.getInfo(request)
+        runCatching { youtubeDL.getInfo(guestRequest) }
+            .onSuccess { return streamFromYtDlpInfo(it, "yt-dlp guest") }
+            .onFailure { failures += "guest: ${shortError(it)}" }
 
+        val cookieStore = YouTubeCookieStore(context)
+        val cookiePath = cookieStore.filePathOrNull()
+        if (cookiePath != null) {
+            // With cookies prefer web_safari/HLS. HLS currently avoids the GVS PO-token requirement
+            // for this client more reliably than a raw progressive googlevideo URL.
+            onProgress("yt-dlp: использую импортированную YouTube-сессию…")
+            val authenticated = baseYtDlpRequest(url).apply {
+                addOption("--cookies", cookiePath)
+                addOption("--extractor-args", "youtube:player_client=web_safari")
+                addOption("-f", "best[protocol^=m3u8]/best[ext=mp4]/best")
+            }
+            runCatching { youtubeDL.getInfo(authenticated) }
+                .onSuccess { return streamFromYtDlpInfo(it, "yt-dlp cookies") }
+                .onFailure { failures += "cookies: ${shortError(it)}" }
+
+            // Final authenticated fallback: let current yt-dlp choose the clients/formats itself.
+            onProgress("yt-dlp: пробую авторизованный auto-режим…")
+            val authenticatedAuto = baseYtDlpRequest(url).apply {
+                addOption("--cookies", cookiePath)
+                addOption("-f", "best[ext=mp4]/best")
+            }
+            runCatching { youtubeDL.getInfo(authenticatedAuto) }
+                .onSuccess { return streamFromYtDlpInfo(it, "yt-dlp cookies auto") }
+                .onFailure { failures += "cookies-auto: ${shortError(it)}" }
+        } else {
+            // Keep the normal anonymous attempt as a last guest fallback.
+            onProgress("yt-dlp: пробую обычный гостевой режим…")
+            val normalGuest = baseYtDlpRequest(url).apply {
+                addOption("-f", "best[ext=mp4]/best")
+            }
+            runCatching { youtubeDL.getInfo(normalGuest) }
+                .onSuccess { return streamFromYtDlpInfo(it, "yt-dlp guest auto") }
+                .onFailure { failures += "guest-auto: ${shortError(it)}" }
+        }
+
+        val joined = failures.joinToString(" • ").take(520)
+        val botGate = joined.contains("confirm you're not a bot", ignoreCase = true) ||
+            joined.contains("LOGIN_REQUIRED", ignoreCase = true) ||
+            joined.contains("sign in", ignoreCase = true)
+
+        if (botGate && cookiePath == null) {
+            throw IllegalStateException(
+                "YouTube запросил подтверждение «не бот». Нажми «Импортировать cookies.txt» " +
+                    "или попробуй другую сеть. $joined",
+            )
+        }
+        throw IllegalStateException(joined.ifBlank { "yt-dlp не вернул playable URL" })
+    }
+
+    private fun baseYtDlpRequest(url: String): YoutubeDLRequest = YoutubeDLRequest(url).apply {
+        addOption("--no-playlist")
+        addOption("--no-warnings")
+    }
+
+    private fun streamFromYtDlpInfo(info: VideoInfo, sourceLabel: String): ResolvedYouTubeStream {
         val direct = info.url?.takeIf { it.isNotBlank() }
         if (direct != null) {
+            val hls = direct.contains(".m3u8", ignoreCase = true) ||
+                direct.contains("/manifest/hls", ignoreCase = true) ||
+                direct.contains("hls_playlist", ignoreCase = true)
             return ResolvedYouTubeStream(
                 title = info.title ?: info.fulltitle ?: "YouTube video",
                 variants = listOf(
                     YouTubePlaybackVariant(
-                        mode = YouTubePlaybackMode.COMBINED,
+                        mode = if (hls) YouTubePlaybackMode.HLS else YouTubePlaybackMode.COMBINED,
                         videoUrl = direct,
-                        videoMimeType = mimeForVideoExt(info.ext),
-                        label = "yt-dlp • ${info.resolution ?: info.format ?: "single stream"}",
+                        videoMimeType = if (hls) null else mimeForVideoExt(info.ext),
+                        label = "$sourceLabel • ${info.resolution ?: info.format ?: if (hls) "HLS" else "single stream"}",
                     ),
                 ),
                 durationSeconds = info.duration.toLong(),
@@ -175,14 +240,21 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
                         audioUrl = audio.url!!,
                         videoMimeType = mimeForVideoExt(video.ext),
                         audioMimeType = mimeForAudioExt(audio.ext),
-                        label = "yt-dlp • ${video.height.takeIf { it > 0 }?.let { "${it}p" } ?: "adaptive"}",
+                        label = "$sourceLabel • ${video.height.takeIf { it > 0 }?.let { "${it}p" } ?: "adaptive"}",
                     ),
                 ),
                 durationSeconds = info.duration.toLong(),
             )
         }
 
-        throw IllegalStateException("yt-dlp вернул метаданные, но без playable URL")
+        throw IllegalStateException("$sourceLabel вернул метаданные, но без playable URL")
+    }
+
+    private fun shortError(error: Throwable): String {
+        return (error.message ?: error.javaClass.simpleName)
+            .replace('\n', ' ')
+            .replace(Regex("\\s+"), " ")
+            .take(220)
     }
 
     private fun resolveBlocking(url: String): ResolvedYouTubeStream {
