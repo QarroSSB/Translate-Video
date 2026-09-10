@@ -1,113 +1,68 @@
 package com.qarro.livetranslator
 
-import android.Manifest
-import android.annotation.SuppressLint
-import android.app.Activity
 import android.content.Intent
-import android.content.pm.PackageManager
-import android.media.AudioAttributes
-import android.media.AudioManager
-import android.media.projection.MediaProjectionManager
-import android.net.Uri
-import android.os.Build
 import android.os.Bundle
-import android.provider.Settings
 import android.view.View
-import android.view.ViewGroup
-import android.webkit.CookieManager
-import android.webkit.JavascriptInterface
-import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.SeekBar
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
+import androidx.media3.common.util.UnstableApi
 import com.qarro.livetranslator.databinding.ActivityMainBinding
 
+@UnstableApi
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val prefs by lazy { getSharedPreferences("qarro_live_translator", MODE_PRIVATE) }
-    private val serverProbe = ServerProbe()
     private val apiKeyStore by lazy { ApiKeyStore(this) }
-    private var videoWebView: WebView? = null
+    private val serverProbe = ServerProbe()
+    private val resolver = YouTubeStreamResolver()
 
-    private val projectionLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
-            val direct = binding.connectionDirect.isChecked
-            val apiKey = if (direct) runCatching { apiKeyStore.load().orEmpty() }.getOrDefault("") else ""
-            if (direct && apiKey.isBlank()) {
-                binding.status.text = "Статус: сначала сохрани OpenAI API key"
-                return@registerForActivityResult
-            }
-
-            val endpoint = binding.endpoint.text.toString().trim().ifEmpty {
-                "ws://127.0.0.1:8765/ws/translate"
-            }
-            val target = binding.targetLanguage.text.toString().trim().ifEmpty { "ru" }
-            val mode = if (direct) "live" else if (binding.modeMultiVoice.isChecked) "multivoice" else "live"
-            val chunkMs = (binding.chunkSeek.progress + 3) * 1000
-            val showOverlay = binding.showOverlay.isChecked
-            val translationVolume = binding.volumeSeek.progress.coerceIn(0, 100)
-            val duckOriginal = binding.duckOriginal.isChecked
-            val connectionMode = if (direct) "direct" else "server"
-
-            prefs.edit()
-                .putString("connection_mode", connectionMode)
-                .putString("endpoint", endpoint)
-                .putString("target", target)
-                .putString("mode", mode)
-                .putInt("chunk_ms", chunkMs)
-                .putBoolean("overlay", showOverlay)
-                .putInt("translation_volume", translationVolume)
-                .putBoolean("duck_original", duckOriginal)
-                .apply()
-
-            val serviceIntent = Intent(this, PlaybackCaptureService::class.java).apply {
-                putExtra(PlaybackCaptureService.EXTRA_RESULT_CODE, result.resultCode)
-                putExtra(PlaybackCaptureService.EXTRA_RESULT_DATA, result.data)
-                putExtra(PlaybackCaptureService.EXTRA_CONNECTION_MODE, connectionMode)
-                putExtra(PlaybackCaptureService.EXTRA_API_KEY, apiKey)
-                putExtra(PlaybackCaptureService.EXTRA_ENDPOINT, endpoint)
-                putExtra(PlaybackCaptureService.EXTRA_TARGET_LANGUAGE, target)
-                putExtra(PlaybackCaptureService.EXTRA_MODE, mode)
-                putExtra(PlaybackCaptureService.EXTRA_CHUNK_MS, chunkMs)
-                putExtra(PlaybackCaptureService.EXTRA_SHOW_OVERLAY, showOverlay)
-                putExtra(PlaybackCaptureService.EXTRA_TRANSLATION_VOLUME, translationVolume)
-                putExtra(PlaybackCaptureService.EXTRA_DUCK_ORIGINAL, duckOriginal)
-            }
-            ContextCompat.startForegroundService(this, serviceIntent)
-            binding.status.text = if (direct) {
-                "Статус: Phone-Only перевод запускается… теперь включи видео"
-            } else {
-                "Статус: серверный перевод запускается…"
-            }
-        } else {
-            binding.status.text = "Статус: разрешение на захват не выдано"
-        }
-    }
-
-    private val permissionsLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { grants ->
-        val audioGranted = grants[Manifest.permission.RECORD_AUDIO] == true ||
-            ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (audioGranted) requestProjection() else binding.status.text = "Статус: нужен доступ RECORD_AUDIO"
-    }
+    private lateinit var pcmBridge: InternalPcmBridge
+    private lateinit var playerEngine: InternalPlayerEngine
+    private var translationClient: AudioTranslationClient? = null
+    private var translationPlayer: PcmAudioPlayer? = null
+    private var subtitleBuffer = StringBuilder()
+    private var translationRunning = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        pcmBridge = InternalPcmBridge(
+            onFirstAudio = {
+                runOnUiThread {
+                    binding.audioTapStatus.text = "Внутренний PCM: обнаружен ✓ • системный захват не используется"
+                }
+            },
+            onMetric = { metric -> runOnUiThread { binding.audioTapStatus.text = metric } },
+        )
+        playerEngine = InternalPlayerEngine(this, pcmBridge) { message ->
+            runOnUiThread { binding.status.text = "Статус: $message" }
+        }
+        playerEngine.attach(binding.playerView)
+
+        migrateOldCaptureSettings()
+        restoreUi()
+        bindUi()
+        handleIncomingIntent(intent)
+    }
+
+    private fun migrateOldCaptureSettings() {
+        val uiVersion = prefs.getInt("internal_player_ui_version", 0)
+        if (uiVersion < 5) {
+            prefs.edit()
+                .putInt("internal_player_ui_version", 5)
+                .putString("connection_mode", "direct")
+                .putString("mode", "live")
+                .apply()
+        }
+    }
+
+    private fun restoreUi() {
         binding.endpoint.setText(prefs.getString("endpoint", "ws://127.0.0.1:8765/ws/translate"))
         binding.targetLanguage.setText(prefs.getString("target", "ru"))
-        binding.showOverlay.isChecked = prefs.getBoolean("overlay", true)
-        binding.duckOriginal.isChecked = prefs.getBoolean("duck_original", false)
+        binding.duckOriginal.isChecked = prefs.getBoolean("duck_original", true)
+        binding.showSubtitles.isChecked = prefs.getBoolean("show_subtitles", true)
         binding.volumeSeek.progress = prefs.getInt("translation_volume", 100).coerceIn(0, 100)
         updateVolumeLabel()
         updateApiKeyStatus()
@@ -116,13 +71,18 @@ class MainActivity : AppCompatActivity() {
         binding.connectionDirect.isChecked = connectionMode != "server"
         binding.connectionServer.isChecked = connectionMode == "server"
 
-        val savedMode = prefs.getString("mode", "live")
-        binding.modeMultiVoice.isChecked = savedMode == "multivoice"
-        binding.modeLive.isChecked = savedMode != "multivoice"
+        val mode = prefs.getString("mode", "live")
+        binding.modeMultiVoice.isChecked = mode == "multivoice"
+        binding.modeLive.isChecked = mode != "multivoice"
+
         val chunkMs = prefs.getInt("chunk_ms", 6000).coerceIn(3000, 12000)
         binding.chunkSeek.progress = chunkMs / 1000 - 3
         updateChunkLabel()
+        updateConnectionUi()
+        updateModeUi()
+    }
 
+    private fun bindUi() {
         binding.chunkSeek.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) = updateChunkLabel()
             override fun onStartTrackingTouch(seekBar: SeekBar?) = Unit
@@ -136,27 +96,18 @@ class MainActivity : AppCompatActivity() {
 
         binding.connectionGroup.setOnCheckedChangeListener { _, _ -> updateConnectionUi() }
         binding.modeGroup.setOnCheckedChangeListener { _, _ -> updateModeUi() }
+        binding.duckOriginal.setOnCheckedChangeListener { _, checked ->
+            if (translationRunning) playerEngine.setOriginalVolume(if (checked) 0.22f else 1f)
+        }
+        binding.showSubtitles.setOnCheckedChangeListener { _, checked ->
+            binding.internalSubtitle.visibility = if (checked && subtitleBuffer.isNotEmpty()) View.VISIBLE else View.GONE
+        }
 
         binding.saveApiKey.setOnClickListener { saveApiKey() }
         binding.testServer.setOnClickListener { testServer() }
         binding.openVideo.setOnClickListener { openYouTubeVideo() }
-        binding.overlayPermission.setOnClickListener {
-            if (!Settings.canDrawOverlays(this)) {
-                startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
-            } else {
-                binding.status.text = "Статус: разрешение на оверлей уже выдано"
-            }
-        }
-
-        binding.start.setOnClickListener { ensurePermissionsAndStart() }
-        binding.stop.setOnClickListener {
-            stopService(Intent(this, PlaybackCaptureService::class.java))
-            binding.status.text = "Статус: остановлено"
-        }
-
-        updateConnectionUi()
-        updateModeUi()
-        handleIncomingIntent(intent)
+        binding.start.setOnClickListener { startTranslation() }
+        binding.stop.setOnClickListener { stopTranslation(showStatus = true) }
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -165,94 +116,142 @@ class MainActivity : AppCompatActivity() {
         handleIncomingIntent(intent)
     }
 
-    override fun onDestroy() {
-        serverProbe.close()
-        runCatching {
-            videoWebView?.stopLoading()
-            videoWebView?.loadUrl("about:blank")
-            videoWebView?.removeJavascriptInterface("QarroPlayer")
-            videoWebView?.removeAllViews()
-            videoWebView?.destroy()
-            videoWebView = null
+    private fun openYouTubeVideo() {
+        val raw = binding.videoUrl.text.toString().trim()
+        val videoId = YouTubeUrlParser.extractVideoId(raw)
+        if (videoId == null) {
+            binding.status.text = "Статус: не удалось определить ID видео из ссылки YouTube"
+            return
         }
-        super.onDestroy()
+
+        val canonicalUrl = "https://www.youtube.com/watch?v=$videoId"
+        binding.openVideo.isEnabled = false
+        binding.status.text = "Статус: получаю прямой поток YouTube на телефоне…"
+        binding.audioTapStatus.text = "Внутренний PCM: ждёт запуска видео"
+
+        resolver.resolve(canonicalUrl) { result ->
+            runOnUiThread {
+                binding.openVideo.isEnabled = true
+                result.onSuccess { stream ->
+                    binding.videoContainer.visibility = View.VISIBLE
+                    subtitleBuffer.clear()
+                    binding.internalSubtitle.text = ""
+                    binding.internalSubtitle.visibility = View.GONE
+                    playerEngine.load(stream)
+                    binding.status.text =
+                        "Статус: ${stream.title} • ${stream.resolution} • нажми Play во встроенном плеере"
+                }.onFailure { error ->
+                    binding.status.text =
+                        "Статус: не удалось получить поток YouTube — ${error.message ?: error.javaClass.simpleName}"
+                }
+            }
+        }
     }
 
-    @SuppressLint("SetJavaScriptEnabled")
-    private fun ensureWebView(): WebView {
-        videoWebView?.let { return it }
+    private fun startTranslation() {
+        stopTranslation(showStatus = false)
 
-        val provider = runCatching { WebView.getCurrentWebViewPackage() }.getOrNull()
-            ?: throw IllegalStateException("Android System WebView недоступен")
+        val direct = binding.connectionDirect.isChecked
+        val target = binding.targetLanguage.text.toString().trim().ifEmpty { "ru" }
+        val chunkMs = (binding.chunkSeek.progress + 3) * 1000
+        val mode = if (direct) "live" else if (binding.modeMultiVoice.isChecked) "multivoice" else "live"
+        val volume = binding.volumeSeek.progress.coerceIn(0, 100)
+        val showSubtitles = binding.showSubtitles.isChecked
 
-        val webView = WebView(this).apply {
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.MATCH_PARENT
+        val onAudio: (ByteArray) -> Unit = { bytes -> translationPlayer?.write(bytes) }
+        val onTranscript: (String) -> Unit = { delta ->
+            if (showSubtitles) runOnUiThread { appendSubtitle(delta) }
+        }
+        val onStatus: (String) -> Unit = { state ->
+            runOnUiThread { binding.status.text = "Статус: перевод $state" }
+        }
+        val onMetric: (String) -> Unit = { metric ->
+            runOnUiThread { binding.audioTapStatus.text = metric }
+        }
+        val onError: (String) -> Unit = { message ->
+            runOnUiThread { binding.status.text = "Статус: ошибка перевода — $message" }
+        }
+
+        val client: AudioTranslationClient = if (direct) {
+            val apiKey = runCatching { apiKeyStore.load().orEmpty() }.getOrDefault("")
+            if (apiKey.isBlank()) {
+                binding.status.text = "Статус: сначала сохрани OpenAI API key"
+                return
+            }
+            DirectTranslationSocket(
+                apiKey = apiKey,
+                targetLanguage = target,
+                onAudio = onAudio,
+                onTargetTranscript = onTranscript,
+                onStatus = onStatus,
+                onMetric = onMetric,
+                onError = onError,
             )
-            settings.apply {
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                mediaPlaybackRequiresUserGesture = true
-                allowFileAccess = false
-                allowContentAccess = false
-                javaScriptCanOpenWindowsAutomatically = false
-            }
-            webChromeClient = WebChromeClient()
-            webViewClient = object : WebViewClient() {
-                override fun onReceivedError(
-                    view: WebView?,
-                    request: WebResourceRequest?,
-                    error: WebResourceError?
-                ) {
-                    super.onReceivedError(view, request, error)
-                    if (request?.isForMainFrame == true) {
-                        binding.status.text = "Статус: WebView ${provider.versionName} — ${error?.description ?: "ошибка загрузки"}"
+        } else {
+            val endpoint = binding.endpoint.text.toString().trim()
+            if (!isValidEndpoint(endpoint)) return
+            TranslationSocket(
+                endpoint = endpoint,
+                targetLanguage = target,
+                mode = mode,
+                chunkMs = chunkMs,
+                onAudio = onAudio,
+                onTargetTranscript = onTranscript,
+                onSpeakerLine = { speaker, emotion, translation ->
+                    if (showSubtitles) runOnUiThread {
+                        showSpeakerSubtitle(speaker, emotion, translation)
                     }
-                }
-            }
-            addJavascriptInterface(PlayerJsBridge(), "QarroPlayer")
+                },
+                onStatus = onStatus,
+                onMetric = onMetric,
+                onError = onError,
+            )
         }
 
-        CookieManager.getInstance().apply {
-            setAcceptCookie(true)
-            setAcceptThirdPartyCookies(webView, true)
-        }
+        prefs.edit()
+            .putString("connection_mode", if (direct) "direct" else "server")
+            .putString("target", target)
+            .putString("mode", mode)
+            .putInt("chunk_ms", chunkMs)
+            .putInt("translation_volume", volume)
+            .putBoolean("duck_original", binding.duckOriginal.isChecked)
+            .putBoolean("show_subtitles", showSubtitles)
+            .apply()
 
-        if (Build.VERSION.SDK_INT >= 29) {
-            runCatching {
-                getSystemService(AudioManager::class.java)
-                    .setAllowedCapturePolicy(AudioAttributes.ALLOW_CAPTURE_BY_ALL)
-            }
-        }
-
-        binding.videoContainer.removeAllViews()
-        binding.videoContainer.addView(webView)
-        videoWebView = webView
-        return webView
+        translationPlayer = PcmAudioPlayer(this, volume, false)
+        translationClient = client
+        pcmBridge.attachClient(client)
+        translationRunning = true
+        playerEngine.setOriginalVolume(if (binding.duckOriginal.isChecked) 0.22f else 1f)
+        client.connect()
+        binding.status.text = "Статус: перевод подключается • запусти видео, захват Android не требуется"
     }
 
-    private inner class PlayerJsBridge {
-        @JavascriptInterface
-        fun ready() {
-            runOnUiThread {
-                binding.status.text = "Статус: YouTube-плеер готов"
-            }
-        }
+    private fun stopTranslation(showStatus: Boolean) {
+        pcmBridge.attachClient(null)
+        translationClient?.close()
+        translationClient = null
+        translationPlayer?.release()
+        translationPlayer = null
+        translationRunning = false
+        if (::playerEngine.isInitialized) playerEngine.setOriginalVolume(1f)
+        if (showStatus && ::binding.isInitialized) binding.status.text = "Статус: перевод остановлен"
+    }
 
-        @JavascriptInterface
-        fun error(code: Int) {
-            runOnUiThread {
-                binding.status.text = when (code) {
-                    2 -> "Статус: YouTube error 2 — неверный ID видео"
-                    5 -> "Статус: YouTube error 5 — ошибка HTML5-плеера"
-                    100 -> "Статус: YouTube error 100 — видео удалено или приватное"
-                    101, 150 -> "Статус: YouTube error $code — автор запретил встраивание"
-                    153 -> "Статус: YouTube error 153 — YouTube не получил идентификацию встроенного клиента"
-                    else -> "Статус: YouTube player error $code"
-                }
-            }
+    private fun appendSubtitle(delta: String) {
+        if (delta.isBlank()) return
+        subtitleBuffer.append(delta)
+        if (subtitleBuffer.length > 420) {
+            subtitleBuffer.delete(0, subtitleBuffer.length - 320)
         }
+        binding.internalSubtitle.text = subtitleBuffer.toString().trim()
+        binding.internalSubtitle.visibility = View.VISIBLE
+    }
+
+    private fun showSpeakerSubtitle(speaker: String, emotion: String, translation: String) {
+        val prefix = listOf(speaker, emotion).filter { it.isNotBlank() }.joinToString(" • ")
+        binding.internalSubtitle.text = if (prefix.isBlank()) translation else "$prefix\n$translation"
+        binding.internalSubtitle.visibility = View.VISIBLE
     }
 
     private fun saveApiKey() {
@@ -285,9 +284,9 @@ class MainActivity : AppCompatActivity() {
         binding.modeMultiVoice.isEnabled = !direct
         if (direct && binding.modeMultiVoice.isChecked) binding.modeLive.isChecked = true
         binding.modeHint.text = if (direct) {
-            "Phone-Only подключается напрямую к Realtime Translation. Multi-voice пока остаётся в Advanced Server."
+            "Phone-Only получает PCM прямо из Media3. Никакого захвата экрана/звука Android."
         } else {
-            "Advanced Server поддерживает Live и текущий Multi-voice с разными голосами и эмоциями."
+            "Advanced Server получает тот же внутренний PCM; Multi-voice доступен через серверный backend."
         }
         updateModeUi()
     }
@@ -322,110 +321,13 @@ class MainActivity : AppCompatActivity() {
                     binding.status.text = if (health.apiKeyConfigured) {
                         "Статус: сервер v${health.version} готов • API key ✓ • ${health.modes}"
                     } else {
-                        "Статус: сервер v${health.version} доступен, но OPENAI_API_KEY не настроен"
+                        "Статус: сервер доступен, но OPENAI_API_KEY не настроен"
                     }
                 }.onFailure { error ->
                     binding.status.text = "Статус: сервер недоступен — ${error.message ?: "ошибка"}"
                 }
             }
         }
-    }
-
-    private fun openYouTubeVideo() {
-        val raw = binding.videoUrl.text.toString().trim()
-        val videoId = YouTubeUrlParser.extractVideoId(raw)
-        if (videoId == null) {
-            binding.status.text = "Статус: не удалось определить ID видео из ссылки YouTube"
-            return
-        }
-
-        val webView = runCatching { ensureWebView() }.getOrElse { error ->
-            binding.status.text = "Статус: WebView не запустился — ${error.message ?: "ошибка"}"
-            return
-        }
-
-        val origin = "https://qarro.local"
-        val encodedOrigin = Uri.encode(origin)
-        val embedUrl = "https://www.youtube.com/embed/$videoId" +
-            "?playsinline=1&rel=0&autoplay=0&enablejsapi=1&origin=$encodedOrigin"
-
-        val html = """
-            <!doctype html>
-            <html>
-            <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
-              <meta name="referrer" content="strict-origin-when-cross-origin">
-              <style>
-                html, body { margin:0; width:100%; height:100%; background:#000; overflow:hidden; }
-                #player { width:100%; height:100%; border:0; }
-              </style>
-            </head>
-            <body>
-              <iframe id="player"
-                src="$embedUrl"
-                referrerpolicy="strict-origin-when-cross-origin"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                allowfullscreen></iframe>
-              <script>
-                window.addEventListener('message', function(event) {
-                  try {
-                    var data = typeof event.data === 'string' ? JSON.parse(event.data) : event.data;
-                    if (data && data.event === 'onReady') QarroPlayer.ready();
-                    if (data && data.event === 'onError' && data.info !== undefined) QarroPlayer.error(parseInt(data.info));
-                  } catch (e) {}
-                });
-              </script>
-            </body>
-            </html>
-        """.trimIndent()
-
-        binding.videoContainer.visibility = View.VISIBLE
-        webView.loadDataWithBaseURL(
-            "$origin/player/",
-            html,
-            "text/html",
-            "UTF-8",
-            null
-        )
-        binding.status.text = "Статус: загружаю YouTube через страницу с Referer…"
-    }
-
-    private fun handleIncomingIntent(incoming: Intent?) {
-        if (incoming?.action != Intent.ACTION_SEND || incoming.type != "text/plain") return
-        val sharedText = incoming.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
-        val link = YouTubeUrlParser.extractSharedYouTubeUrl(sharedText) ?: sharedText.trim()
-        if (YouTubeUrlParser.extractVideoId(link) != null) {
-            binding.videoUrl.setText(link)
-            binding.status.text = "Статус: ссылка получена из YouTube. Нажми «Открыть видео»."
-        }
-    }
-
-    private fun ensurePermissionsAndStart() {
-        if (binding.showOverlay.isChecked && !Settings.canDrawOverlays(this)) {
-            binding.status.text = "Статус: сначала разреши субтитры поверх приложений или отключи их"
-            return
-        }
-        if (binding.connectionDirect.isChecked) {
-            val hasKey = runCatching { apiKeyStore.hasKey() }.getOrDefault(false)
-            if (!hasKey) {
-                binding.status.text = "Статус: сначала введи и сохрани OpenAI API key"
-                return
-            }
-        } else if (!isValidEndpoint(binding.endpoint.text.toString().trim())) {
-            return
-        }
-
-        val needed = mutableListOf<String>()
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            needed += Manifest.permission.RECORD_AUDIO
-        }
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            needed += Manifest.permission.POST_NOTIFICATIONS
-        }
-        if (needed.isEmpty()) requestProjection() else permissionsLauncher.launch(needed.toTypedArray())
     }
 
     private fun isValidEndpoint(endpoint: String): Boolean {
@@ -436,8 +338,22 @@ class MainActivity : AppCompatActivity() {
         return true
     }
 
-    private fun requestProjection() {
-        val manager = getSystemService(MediaProjectionManager::class.java)
-        projectionLauncher.launch(manager.createScreenCaptureIntent())
+    private fun handleIncomingIntent(incoming: Intent?) {
+        if (incoming?.action != Intent.ACTION_SEND || incoming.type != "text/plain") return
+        val sharedText = incoming.getStringExtra(Intent.EXTRA_TEXT).orEmpty()
+        val link = YouTubeUrlParser.extractSharedYouTubeUrl(sharedText) ?: sharedText.trim()
+        if (YouTubeUrlParser.extractVideoId(link) != null) {
+            binding.videoUrl.setText(link)
+            binding.status.text = "Статус: ссылка получена из YouTube. Нажми «Получить и открыть видео»."
+        }
+    }
+
+    override fun onDestroy() {
+        stopTranslation(showStatus = false)
+        playerEngine.release()
+        pcmBridge.close()
+        resolver.close()
+        serverProbe.close()
+        super.onDestroy()
     }
 }
