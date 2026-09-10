@@ -21,21 +21,21 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="v0.4.1 • Phone-Only startup-safe"
+            android:text="v0.5 • Internal Player • без захвата звука Android"
             android:textSize="15sp" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="Видео"
+            android:text="YouTube-видео"
             android:textStyle="bold" />
 
         <EditText
             android:id="@+id/videoUrl"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="Вставь ссылку YouTube или нажми Поделиться → Qarro"
+            android:hint="Вставь ссылку YouTube или Поделиться → Qarro"
             android:inputType="textUri"
             android:singleLine="true" />
 
@@ -43,20 +43,48 @@
             android:id="@+id/openVideo"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="▶ Открыть видео в Qarro Translator" />
+            android:text="▶ Получить и открыть видео" />
 
         <FrameLayout
             android:id="@+id/videoContainer"
             android:layout_width="match_parent"
-            android:layout_height="220dp"
+            android:layout_height="240dp"
             android:layout_marginTop="8dp"
-            android:visibility="gone" />
+            android:background="#000000"
+            android:visibility="gone">
+
+            <androidx.media3.ui.PlayerView
+                android:id="@+id/playerView"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+
+            <TextView
+                android:id="@+id/internalSubtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_gravity="bottom"
+                android:background="#99000000"
+                android:gravity="center"
+                android:padding="8dp"
+                android:textColor="#FFFFFF"
+                android:textSize="17sp"
+                android:textStyle="bold"
+                android:visibility="gone" />
+        </FrameLayout>
+
+        <TextView
+            android:id="@+id/audioTapStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Внутренний PCM: ждёт воспроизведения"
+            android:textSize="13sp" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="Подключение перевода"
+            android:text="Перевод"
             android:textStyle="bold" />
 
         <RadioGroup
@@ -69,13 +97,13 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:checked="true"
-                android:text="📱 Phone-Only — без ПК, Termux и локального сервера" />
+                android:text="📱 Phone-Only — OpenAI напрямую с телефона" />
 
             <RadioButton
                 android:id="@+id/connectionServer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="🛠 Advanced Server — текущий Multi-voice backend" />
+                android:text="🛠 Advanced Server — Multi-voice backend" />
         </RadioGroup>
 
         <LinearLayout
@@ -136,17 +164,11 @@
             android:inputType="text"
             android:text="ru" />
 
-        <TextView
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Режим"
-            android:textStyle="bold" />
-
         <RadioGroup
             android:id="@+id/modeGroup"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp">
 
             <RadioButton
                 android:id="@+id/modeLive"
@@ -166,7 +188,7 @@
             android:id="@+id/chunkLabel"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
+            android:layout_marginTop="8dp"
             android:text="Контекст Multi-voice: 6 сек" />
 
         <SeekBar
@@ -180,7 +202,7 @@
             android:id="@+id/modeHint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Phone-Only использует Live. Multi-voice пока доступен через Advanced Server."
+            android:text="Phone-Only использует внутренний PCM плеера. Multi-voice пока требует Advanced Server."
             android:textSize="13sp" />
 
         <TextView
@@ -201,21 +223,15 @@
             android:id="@+id/duckOriginal"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Приглушать оригинальный звук во время русского голоса" />
+            android:checked="true"
+            android:text="Приглушать оригинальную дорожку при переводе" />
 
         <CheckBox
-            android:id="@+id/showOverlay"
+            android:id="@+id/showSubtitles"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:checked="true"
-            android:text="Показывать русские субтитры поверх видео" />
-
-        <Button
-            android:id="@+id/overlayPermission"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="Разрешить субтитры поверх приложений" />
+            android:text="Показывать русский текст внутри плеера" />
 
         <Button
             android:id="@+id/start"
@@ -228,20 +244,20 @@
             android:id="@+id/stop"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="■ Остановить" />
+            android:text="■ Остановить перевод" />
 
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="16dp"
-            android:text="Статус: готов"
+            android:text="Статус: вставь ссылку YouTube"
             android:textStyle="bold" />
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="Для теста: вставь ссылку, открой видео, сохрани API key, нажми «Начать перевод», разреши захват, затем запусти видео." />
+            android:text="v0.5 не запрашивает запись экрана или захват звука. Аудио для перевода берётся непосредственно из декодера встроенного Media3-плеера." />
     </LinearLayout>
 </ScrollView>
