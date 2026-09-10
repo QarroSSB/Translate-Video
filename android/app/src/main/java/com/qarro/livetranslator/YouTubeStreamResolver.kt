@@ -41,8 +41,8 @@ data class ResolvedYouTubeStream(
 }
 
 /**
- * Resolves a YouTube URL on-device.
- * Fast path: NewPipe. Fallbacks: yt-dlp guest web_embedded, then authenticated yt-dlp cookies.
+ * Resolves a YouTube URL entirely on the phone.
+ * Order: NewPipe -> on-device BotGuard/PO-token WEB_EMBEDDED -> yt-dlp -> cookies.txt.
  */
 class YouTubeStreamResolver(context: Context? = null) : Closeable {
     companion object {
@@ -58,6 +58,7 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
 
     private val appContext = context?.applicationContext
     private val executor = Executors.newSingleThreadExecutor()
+    private val poTokenResolver = appContext?.let { YouTubePoTokenResolver(it) }
 
     fun resolve(
         url: String,
@@ -65,6 +66,7 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
         callback: (Result<ResolvedYouTubeStream>) -> Unit,
     ) {
         executor.execute {
+            ensureInitialized()
             onProgress("NewPipe: получаю метаданные YouTube…")
             val primary = runCatching { resolveBlocking(url) }
             if (primary.isSuccess) {
@@ -80,38 +82,45 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
                 return@execute
             }
 
-            onProgress("NewPipe не получил поток • переключаюсь на yt-dlp…")
+            onProgress("NewPipe получил anti-bot • пробую PO Token через WebView…")
+            val poResult = runCatching {
+                poTokenResolver?.resolve(url, onProgress)
+                    ?: throw IllegalStateException("PO Token resolver недоступен")
+            }
+            if (poResult.isSuccess) {
+                callback(poResult)
+                return@execute
+            }
+            val poError = poResult.exceptionOrNull()
+
+            onProgress("PO Token не получил поток • переключаюсь на yt-dlp…")
             val fallback = runCatching { resolveWithYtDlp(context, url, onProgress) }
             if (fallback.isSuccess) {
                 onProgress("yt-dlp: поток найден ✓")
                 callback(fallback)
-            } else {
-                val fallbackError = fallback.exceptionOrNull()
-                val p = primaryError?.message?.take(180) ?: primaryError?.javaClass?.simpleName ?: "unknown"
-                val f = fallbackError?.message?.take(280) ?: fallbackError?.javaClass?.simpleName ?: "unknown"
-                callback(
-                    Result.failure(
-                        IllegalStateException(
-                            "Не удалось открыть YouTube. NewPipe: $p • yt-dlp: $f",
-                            fallbackError,
-                        ),
-                    ),
-                )
+                return@execute
             }
+
+            val fallbackError = fallback.exceptionOrNull()
+            callback(
+                Result.failure(
+                    IllegalStateException(
+                        "Не удалось открыть YouTube. NewPipe: ${shortError(primaryError)} • " +
+                            "PO Token: ${shortError(poError)} • yt-dlp: ${shortError(fallbackError)}",
+                        fallbackError,
+                    ),
+                ),
+            )
         }
     }
 
-    internal fun resolveBlockingForDiagnostics(url: String): ResolvedYouTubeStream = resolveBlocking(url)
-
-    private fun wrapPrimaryFailure(error: Throwable?): Throwable {
-        val detail = error?.message?.take(220).orEmpty()
-        val base = if (detail.isBlank()) {
-            error?.javaClass?.simpleName ?: "unknown extractor error"
-        } else {
-            "${error?.javaClass?.simpleName}: $detail"
-        }
-        return IllegalStateException("$base • ${QarroDownloader.lastDiagnostic}", error)
+    internal fun resolveBlockingForDiagnostics(url: String): ResolvedYouTubeStream {
+        ensureInitialized()
+        return resolveBlocking(url)
     }
+
+    private fun wrapPrimaryFailure(error: Throwable?): Throwable =
+        IllegalStateException("${shortError(error)} • ${QarroDownloader.lastDiagnostic}", error)
 
     private fun resolveWithYtDlp(
         context: Context,
@@ -127,17 +136,11 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
         val now = System.currentTimeMillis()
         if (now - lastUpdate > 24L * 60L * 60L * 1000L) {
             onProgress("yt-dlp: проверяю актуальную версию…")
-            runCatching {
-                youtubeDL.updateYoutubeDL(context, YoutubeDL.UpdateChannel._STABLE)
-            }.onSuccess {
-                prefs.edit().putLong("ytdlp_last_update_ms", now).apply()
-            }
+            runCatching { youtubeDL.updateYoutubeDL(context, YoutubeDL.UpdateChannel._STABLE) }
+                .onSuccess { prefs.edit().putLong("ytdlp_last_update_ms", now).apply() }
         }
 
         val failures = mutableListOf<String>()
-
-        // First try a client that currently does not require a GVS PO token for embeddable videos.
-        // Skipping the normal webpage also avoids the anonymous-watch bot gate on some IPs.
         onProgress("yt-dlp: пробую гостевой web_embedded…")
         val guestRequest = baseYtDlpRequest(url).apply {
             addOption("--extractor-args", "youtube:player_client=web_embedded;player_skip=webpage,configs")
@@ -147,11 +150,8 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
             .onSuccess { return streamFromYtDlpInfo(it, "yt-dlp guest") }
             .onFailure { failures += "guest: ${shortError(it)}" }
 
-        val cookieStore = YouTubeCookieStore(context)
-        val cookiePath = cookieStore.filePathOrNull()
+        val cookiePath = YouTubeCookieStore(context).filePathOrNull()
         if (cookiePath != null) {
-            // With cookies prefer web_safari/HLS. HLS currently avoids the GVS PO-token requirement
-            // for this client more reliably than a raw progressive googlevideo URL.
             onProgress("yt-dlp: использую импортированную YouTube-сессию…")
             val authenticated = baseYtDlpRequest(url).apply {
                 addOption("--cookies", cookiePath)
@@ -162,7 +162,6 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
                 .onSuccess { return streamFromYtDlpInfo(it, "yt-dlp cookies") }
                 .onFailure { failures += "cookies: ${shortError(it)}" }
 
-            // Final authenticated fallback: let current yt-dlp choose the clients/formats itself.
             onProgress("yt-dlp: пробую авторизованный auto-режим…")
             val authenticatedAuto = baseYtDlpRequest(url).apply {
                 addOption("--cookies", cookiePath)
@@ -172,7 +171,6 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
                 .onSuccess { return streamFromYtDlpInfo(it, "yt-dlp cookies auto") }
                 .onFailure { failures += "cookies-auto: ${shortError(it)}" }
         } else {
-            // Keep the normal anonymous attempt as a last guest fallback.
             onProgress("yt-dlp: пробую обычный гостевой режим…")
             val normalGuest = baseYtDlpRequest(url).apply {
                 addOption("-f", "best[ext=mp4]/best")
@@ -182,15 +180,13 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
                 .onFailure { failures += "guest-auto: ${shortError(it)}" }
         }
 
-        val joined = failures.joinToString(" • ").take(520)
+        val joined = failures.joinToString(" • ").take(620)
         val botGate = joined.contains("confirm you're not a bot", ignoreCase = true) ||
             joined.contains("LOGIN_REQUIRED", ignoreCase = true) ||
             joined.contains("sign in", ignoreCase = true)
-
         if (botGate && cookiePath == null) {
             throw IllegalStateException(
-                "YouTube запросил подтверждение «не бот». Нажми «Импортировать cookies.txt» " +
-                    "или попробуй другую сеть. $joined",
+                "YouTube всё ещё требует Sign in после PO-token fallback. cookies.txt остаётся резервом. $joined",
             )
         }
         throw IllegalStateException(joined.ifBlank { "yt-dlp не вернул playable URL" })
@@ -246,15 +242,7 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
                 durationSeconds = info.duration.toLong(),
             )
         }
-
         throw IllegalStateException("$sourceLabel вернул метаданные, но без playable URL")
-    }
-
-    private fun shortError(error: Throwable): String {
-        return (error.message ?: error.javaClass.simpleName)
-            .replace('\n', ' ')
-            .replace(Regex("\\s+"), " ")
-            .take(220)
     }
 
     private fun resolveBlocking(url: String): ResolvedYouTubeStream {
@@ -276,10 +264,8 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
         }
 
         val combined = chooseVideo(
-            info.videoStreams.filter { stream ->
-                stream.isUrl &&
-                    !stream.isVideoOnly &&
-                    stream.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP
+            info.videoStreams.filter {
+                it.isUrl && !it.isVideoOnly && it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP
             },
         )
         if (combined != null) {
@@ -290,89 +276,52 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
                 label = "${displayResolution(combined)} progressive",
             )
         }
-
-        info.hlsUrl.takeIf { it.isNotBlank() }?.let { hls ->
-            variants += YouTubePlaybackVariant(
-                mode = YouTubePlaybackMode.HLS,
-                videoUrl = hls,
-                label = "HLS",
-            )
+        info.hlsUrl.takeIf { it.isNotBlank() }?.let {
+            variants += YouTubePlaybackVariant(YouTubePlaybackMode.HLS, it, label = "HLS")
         }
-        info.dashMpdUrl.takeIf { it.isNotBlank() }?.let { dash ->
-            variants += YouTubePlaybackVariant(
-                mode = YouTubePlaybackMode.DASH,
-                videoUrl = dash,
-                label = "DASH",
-            )
+        info.dashMpdUrl.takeIf { it.isNotBlank() }?.let {
+            variants += YouTubePlaybackVariant(YouTubePlaybackMode.DASH, it, label = "DASH")
         }
-
         if (variants.isEmpty()) {
-            val diagnostics =
-                "video=${info.videoStreams.size}, videoOnly=${info.videoOnlyStreams.size}, " +
-                    "audio=${info.audioStreams.size}, hls=${info.hlsUrl.isNotBlank()}, " +
-                    "dash=${info.dashMpdUrl.isNotBlank()}"
-            throw IllegalStateException("YouTube не отдал совместимый поток ($diagnostics)")
+            throw IllegalStateException(
+                "YouTube не отдал совместимый поток " +
+                    "(video=${info.videoStreams.size}, videoOnly=${info.videoOnlyStreams.size}, audio=${info.audioStreams.size})",
+            )
         }
-
         return ResolvedYouTubeStream(
             title = info.name,
-            variants = variants.distinctBy { variant ->
-                listOf(variant.mode.name, variant.videoUrl, variant.audioUrl.orEmpty()).joinToString("|")
-            },
+            variants = variants.distinctBy { listOf(it.mode.name, it.videoUrl, it.audioUrl.orEmpty()).joinToString("|") },
             durationSeconds = info.duration,
         )
     }
 
     private fun chooseVideo(streams: List<VideoStream>): VideoStream? {
-        val playable = streams.filter { stream ->
-            stream.isUrl &&
-                stream.content.isNotBlank() &&
-                stream.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP
+        val playable = streams.filter {
+            it.isUrl && it.content.isNotBlank() && it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP
         }
         if (playable.isEmpty()) return null
-
-        val mp4 = playable.filter { it.format == MediaFormat.MPEG_4 }
-        val formatPreferred = mp4.ifEmpty { playable }
-        val saneResolution = formatPreferred.filter { stream ->
-            val height = effectiveHeight(stream)
-            height in 144..1080
-        }
-        val candidates = saneResolution.ifEmpty { formatPreferred }
-
-        return candidates.maxWithOrNull(
-            compareBy<VideoStream>({ effectiveHeight(it) }, { it.bitrate }),
-        )
+        val preferred = playable.filter { it.format == MediaFormat.MPEG_4 }.ifEmpty { playable }
+        val sane = preferred.filter { effectiveHeight(it) in 144..1080 }.ifEmpty { preferred }
+        return sane.maxWithOrNull(compareBy<VideoStream>({ effectiveHeight(it) }, { it.bitrate }))
     }
 
     private fun chooseAudio(streams: List<AudioStream>): AudioStream? {
-        val playable = streams.filter { stream ->
-            stream.isUrl &&
-                stream.content.isNotBlank() &&
-                stream.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP
+        val playable = streams.filter {
+            it.isUrl && it.content.isNotBlank() && it.deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP
         }
         if (playable.isEmpty()) return null
-
-        val m4a = playable.filter { it.format == MediaFormat.M4A }
-        val candidates = m4a.ifEmpty { playable }
-        return candidates.maxWithOrNull(
-            compareBy<AudioStream>({ it.averageBitrate }, { it.bitrate }),
-        )
+        val preferred = playable.filter { it.format == MediaFormat.M4A }.ifEmpty { playable }
+        return preferred.maxWithOrNull(compareBy<AudioStream>({ it.averageBitrate }, { it.bitrate }))
     }
 
     private fun effectiveHeight(stream: VideoStream): Int {
         if (stream.height > 0) return stream.height
         return Regex("(\\d{3,4})p", RegexOption.IGNORE_CASE)
-            .find(stream.resolution)
-            ?.groupValues
-            ?.getOrNull(1)
-            ?.toIntOrNull()
-            ?: 0
+            .find(stream.resolution)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
     }
 
-    private fun displayResolution(stream: VideoStream): String {
-        return stream.resolution.ifBlank {
-            effectiveHeight(stream).takeIf { it > 0 }?.let { "${it}p" } ?: "video"
-        }
+    private fun displayResolution(stream: VideoStream): String = stream.resolution.ifBlank {
+        effectiveHeight(stream).takeIf { it > 0 }?.let { "${it}p" } ?: "video"
     }
 
     private fun mimeForVideoExt(ext: String?): String? = when (ext?.lowercase()) {
@@ -387,7 +336,16 @@ class YouTubeStreamResolver(context: Context? = null) : Closeable {
         else -> null
     }
 
+    private fun shortError(error: Throwable?): String {
+        if (error == null) return "unknown"
+        return (error.message ?: error.javaClass.simpleName)
+            .replace('\n', ' ')
+            .replace(Regex("\\s+"), " ")
+            .take(280)
+    }
+
     override fun close() {
+        poTokenResolver?.close()
         executor.shutdownNow()
     }
 }
