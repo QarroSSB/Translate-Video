@@ -18,6 +18,7 @@ class MainActivity : AppCompatActivity() {
     private val cookieStore by lazy { YouTubeCookieStore(this) }
     private val serverProbe = ServerProbe()
     private val resolver by lazy { YouTubeStreamResolver(applicationContext) }
+    private val proxyResolver by lazy { InvidiousProxyResolver() }
 
     private val cookiePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@registerForActivityResult
@@ -82,6 +83,7 @@ class MainActivity : AppCompatActivity() {
         updateVolumeLabel()
         updateApiKeyStatus()
         updateCookieStatus()
+        binding.openViaProxy.visibility = View.GONE
 
         val connectionMode = prefs.getString("connection_mode", "direct")
         binding.connectionDirect.isChecked = connectionMode != "server"
@@ -127,6 +129,7 @@ class MainActivity : AppCompatActivity() {
             updateCookieStatus()
             showVideoStatus("YouTube cookies удалены")
         }
+        binding.openViaProxy.setOnClickListener { openYouTubeViaProxy() }
         binding.saveApiKey.setOnClickListener { saveApiKey() }
         binding.testServer.setOnClickListener { testServer() }
         binding.openVideo.setOnClickListener { openYouTubeVideo() }
@@ -150,6 +153,7 @@ class MainActivity : AppCompatActivity() {
 
         val canonicalUrl = "https://www.youtube.com/watch?v=$videoId"
         binding.openVideo.isEnabled = false
+        binding.openViaProxy.visibility = View.GONE
         showVideoStatus("шаг 1/3 • получаю поток YouTube…")
         binding.audioTapStatus.text = "Диагностика YouTube: запуск resolver…"
 
@@ -165,21 +169,66 @@ class MainActivity : AppCompatActivity() {
             runOnUiThread {
                 binding.openVideo.isEnabled = true
                 result.onSuccess { stream ->
-                    binding.videoContainer.visibility = View.VISIBLE
-                    subtitleBuffer.clear()
-                    binding.internalSubtitle.text = ""
-                    binding.internalSubtitle.visibility = View.GONE
-                    binding.audioTapStatus.text =
-                        "Диагностика YouTube: поток OK • ${stream.resolution} • запускаю Media3"
-                    showVideoStatus("шаг 2/3 • поток найден • открываю плеер…")
-                    playerEngine.load(stream)
+                    loadResolvedStream(stream, "прямой resolver")
                 }.onFailure { error ->
                     val message = error.message ?: error.javaClass.simpleName
                     binding.audioTapStatus.text = "Диагностика YouTube: $message"
-                    showVideoStatus("Не удалось открыть видео: $message", toast = true)
+                    binding.openViaProxy.visibility = View.VISIBLE
+                    showVideoStatus(
+                        "YouTube заблокировал прямой доступ. Можно импортировать cookies.txt или нажать «Открыть через публичный proxy».",
+                        toast = true,
+                    )
                 }
             }
         }
+    }
+
+    private fun openYouTubeViaProxy() {
+        val raw = binding.videoUrl.text.toString().trim()
+        val videoId = YouTubeUrlParser.extractVideoId(raw)
+        if (videoId == null) {
+            showVideoStatus("не удалось определить ID видео из ссылки YouTube", toast = true)
+            return
+        }
+
+        binding.openVideo.isEnabled = false
+        binding.openViaProxy.isEnabled = false
+        showVideoStatus("публичный proxy • ищу доступный Invidious-инстанс…")
+        binding.audioTapStatus.text = "Proxy fallback: запрос пойдёт через сторонний публичный Invidious-сервер"
+
+        proxyResolver.resolve(
+            videoId,
+            onProgress = { progress ->
+                runOnUiThread {
+                    binding.status.text = "Статус: $progress"
+                    binding.audioTapStatus.text = "Proxy fallback: $progress"
+                }
+            },
+        ) { result ->
+            runOnUiThread {
+                binding.openVideo.isEnabled = true
+                binding.openViaProxy.isEnabled = true
+                result.onSuccess { stream ->
+                    binding.openViaProxy.visibility = View.GONE
+                    loadResolvedStream(stream, "публичный proxy")
+                }.onFailure { error ->
+                    val message = error.message ?: error.javaClass.simpleName
+                    binding.audioTapStatus.text = "Proxy fallback: $message"
+                    showVideoStatus("Proxy тоже не открыл видео: $message", toast = true)
+                }
+            }
+        }
+    }
+
+    private fun loadResolvedStream(stream: ResolvedYouTubeStream, source: String) {
+        binding.videoContainer.visibility = View.VISIBLE
+        subtitleBuffer.clear()
+        binding.internalSubtitle.text = ""
+        binding.internalSubtitle.visibility = View.GONE
+        binding.audioTapStatus.text =
+            "Источник: $source • поток OK • ${stream.resolution} • запускаю Media3"
+        showVideoStatus("шаг 2/3 • поток найден • открываю плеер…")
+        playerEngine.load(stream)
     }
 
     private fun showVideoStatus(message: String, toast: Boolean = false) {
@@ -404,6 +453,7 @@ class MainActivity : AppCompatActivity() {
         playerEngine.release()
         pcmBridge.close()
         resolver.close()
+        proxyResolver.close()
         serverProbe.close()
         super.onDestroy()
     }
