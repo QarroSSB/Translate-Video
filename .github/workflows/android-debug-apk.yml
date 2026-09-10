@@ -26,11 +26,11 @@ jobs:
       - name: Install Android SDK packages
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;35.0.0"
 
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: '8.11.1'
 
       - name: Build debug APK
         working-directory: android
@@ -41,6 +41,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: QarroLiveTranslator-v0.4-debug-apk
+          name: QarroLiveTranslator-v0.5-internal-player-debug-apk
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
