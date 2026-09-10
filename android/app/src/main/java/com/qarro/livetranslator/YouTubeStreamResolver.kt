@@ -36,11 +36,7 @@ data class ResolvedYouTubeStream(
         get() = variants.firstOrNull()?.label ?: "авто"
 }
 
-/**
- * Resolves a normal YouTube watch/share URL to one or more playable variants.
- * Modern YouTube commonly exposes video and audio as separate adaptive streams,
- * so we keep those instead of requiring a legacy video+audio progressive URL.
- */
+/** Resolves a YouTube watch/share URL to playable Media3 variants. */
 class YouTubeStreamResolver : Closeable {
     companion object {
         private val initialized = AtomicBoolean(false)
@@ -57,17 +53,23 @@ class YouTubeStreamResolver : Closeable {
 
     fun resolve(url: String, callback: (Result<ResolvedYouTubeStream>) -> Unit) {
         executor.execute {
-            callback(runCatching { resolveBlocking(url) })
+            val result = runCatching { resolveBlocking(url) }
+                .recoverCatching { error ->
+                    val detail = error.message?.take(220).orEmpty()
+                    val base = if (detail.isBlank()) error.javaClass.simpleName else "${error.javaClass.simpleName}: $detail"
+                    throw IllegalStateException("$base • ${QarroDownloader.lastDiagnostic}", error)
+                }
+            callback(result)
         }
     }
+
+    internal fun resolveBlockingForDiagnostics(url: String): ResolvedYouTubeStream = resolveBlocking(url)
 
     private fun resolveBlocking(url: String): ResolvedYouTubeStream {
         ensureInitialized()
         val info = StreamInfo.getInfo(ServiceList.YouTube, url)
         val variants = mutableListOf<YouTubePlaybackVariant>()
 
-        // Modern YouTube path: adaptive video + adaptive audio. Prefer MP4/M4A and <=1080p
-        // for broad Android hardware-decoder compatibility and predictable bandwidth.
         val adaptiveVideo = chooseVideo(info.videoOnlyStreams)
         val adaptiveAudio = chooseAudio(info.audioStreams)
         if (adaptiveVideo != null && adaptiveAudio != null) {
@@ -81,8 +83,6 @@ class YouTubeStreamResolver : Closeable {
             )
         }
 
-        // Legacy progressive stream remains a useful fallback on videos where YouTube still
-        // exposes one URL containing both video and audio.
         val combined = chooseVideo(
             info.videoStreams.filter { stream ->
                 stream.isUrl &&
@@ -99,7 +99,6 @@ class YouTubeStreamResolver : Closeable {
             )
         }
 
-        // Manifest fallbacks are especially useful for live streams and some regional variants.
         info.hlsUrl.takeIf { it.isNotBlank() }?.let { hls ->
             variants += YouTubePlaybackVariant(
                 mode = YouTubePlaybackMode.HLS,
