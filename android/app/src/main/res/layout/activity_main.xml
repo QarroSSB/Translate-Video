@@ -21,7 +21,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:layout_marginTop="6dp"
-            android:text="v0.5 • Internal Player • без захвата звука Android"
+            android:text="v0.5.5 • Internal Player • без захвата звука Android"
             android:textSize="15sp" />
 
         <TextView
@@ -44,6 +44,40 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="▶ Получить и открыть видео" />
+
+        <TextView
+            android:id="@+id/cookieStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="YouTube-сессия: не импортирована"
+            android:textSize="13sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/importCookies"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Импортировать cookies.txt" />
+
+            <Button
+                android:id="@+id/clearCookies"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:text="Удалить" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Нужно только если YouTube требует Sign in / «подтвердите, что вы не бот». Cookies остаются в приватном хранилище приложения."
+            android:textSize="12sp" />
 
         <FrameLayout
             android:id="@+id/videoContainer"
@@ -258,6 +292,6 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="18dp"
-            android:text="v0.5 не запрашивает запись экрана или захват звука. Аудио для перевода берётся непосредственно из декодера встроенного Media3-плеера." />
+            android:text="v0.5.5 не запрашивает запись экрана или захват звука. Аудио для перевода берётся непосредственно из декодера встроенного Media3-плеера." />
     </LinearLayout>
 </ScrollView>
