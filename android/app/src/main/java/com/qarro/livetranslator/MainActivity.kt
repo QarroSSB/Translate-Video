@@ -4,6 +4,7 @@ import android.content.Intent
 import android.os.Bundle
 import android.view.View
 import android.widget.SeekBar
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import androidx.media3.common.util.UnstableApi
 import com.qarro.livetranslator.databinding.ActivityMainBinding
@@ -120,14 +121,14 @@ class MainActivity : AppCompatActivity() {
         val raw = binding.videoUrl.text.toString().trim()
         val videoId = YouTubeUrlParser.extractVideoId(raw)
         if (videoId == null) {
-            binding.status.text = "Статус: не удалось определить ID видео из ссылки YouTube"
+            showVideoStatus("не удалось определить ID видео из ссылки YouTube", toast = true)
             return
         }
 
         val canonicalUrl = "https://www.youtube.com/watch?v=$videoId"
         binding.openVideo.isEnabled = false
-        binding.status.text = "Статус: получаю прямой поток YouTube на телефоне…"
-        binding.audioTapStatus.text = "Внутренний PCM: ждёт запуска видео"
+        showVideoStatus("шаг 1/3 • обращаюсь к YouTube Extractor…")
+        binding.audioTapStatus.text = "Диагностика YouTube: запрос метаданных…"
 
         resolver.resolve(canonicalUrl) { result ->
             runOnUiThread {
@@ -137,14 +138,23 @@ class MainActivity : AppCompatActivity() {
                     subtitleBuffer.clear()
                     binding.internalSubtitle.text = ""
                     binding.internalSubtitle.visibility = View.GONE
+                    binding.audioTapStatus.text =
+                        "Диагностика YouTube: extractor OK • вариантов ${stream.variants.size} • запускаю Media3"
+                    showVideoStatus("шаг 2/3 • поток найден • открываю плеер…")
                     playerEngine.load(stream)
-                    binding.status.text =
-                        "Статус: ${stream.title} • ${stream.resolution} • нажми Play во встроенном плеере"
                 }.onFailure { error ->
-                    binding.status.text =
-                        "Статус: не удалось получить поток YouTube — ${error.message ?: error.javaClass.simpleName}"
+                    val message = error.message ?: error.javaClass.simpleName
+                    binding.audioTapStatus.text = "Диагностика YouTube: $message"
+                    showVideoStatus("Extractor не получил видео: $message", toast = true)
                 }
             }
+        }
+    }
+
+    private fun showVideoStatus(message: String, toast: Boolean = false) {
+        binding.status.text = "Статус: $message"
+        if (toast) {
+            Toast.makeText(this, message.take(300), Toast.LENGTH_LONG).show()
         }
     }
 
