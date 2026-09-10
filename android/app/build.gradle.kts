@@ -5,7 +5,7 @@ plugins {
 
 android {
     namespace = "com.qarro.livetranslator"
-    compileSdk = 35
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.qarro.livetranslator"
